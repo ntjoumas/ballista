@@ -5,8 +5,8 @@
   "type": "module",
   "scripts": {
     "dev": "nuxi dev",
-    "build": "nuxt build",
-    "generate": "nuxt generate",
+    "build": "nuxi prepare && nuxt build",
+    "generate": "nuxi prepare && nuxt generate",
     "preview": "nuxt preview",
     "tauri": "tauri"
   },

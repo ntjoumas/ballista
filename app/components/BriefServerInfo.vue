@@ -47,6 +47,7 @@ const lastConnectedLabel = computed(() => formatRelativeTime(props.server.lastCo
 
 const currentStatus = computed(() => props.status ?? LandingScreenServerStatus.PENDING)
 const isAvailable = computed(() => currentStatus.value === LandingScreenServerStatus.AVAILABLE)
+const iconSrc = computed(() => props.server.iconDataUrl ?? null)
 </script>
 
 <template>
@@ -58,6 +59,17 @@ const isAvailable = computed(() => currentStatus.value === LandingScreenServerSt
   >
     <section class="flex-1 flex items-center gap-3 min-w-0">
       <div
+        v-if="iconSrc"
+        class="flex-none size-8 rounded-md overflow-hidden border border-border bg-surface-1"
+      >
+        <img
+          :src="iconSrc"
+          :alt="`${server.name} icon`"
+          class="size-full object-cover"
+        />
+      </div>
+      <div
+        v-else
         class="flex-none flex items-center justify-center font-semibold text-white size-8 rounded-md text-xs"
         :class="avatarColor"
       >

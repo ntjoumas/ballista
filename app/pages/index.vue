@@ -9,6 +9,8 @@ import { open as shellOpen } from "@tauri-apps/plugin-shell"
 type SortMode = "group" | "name" | "lastConnected" | "status"
 
 const isLoading = ref<boolean>(false)
+const isInitializing = ref<boolean>(true)
+const initializationError = ref<string | null>(null)
 const progressMessage = ref<string>("Connecting...")
 const launchError = ref<string | null>(null)
 const searchFilter = ref<string>("")
@@ -21,7 +23,7 @@ watch(sortBy, (v) => {
   showSortMenu.value = false
 })
 
-const servers: Connection[] = JSON.parse(await invoke("load_connections"))
+const servers = ref<Connection[]>([])
 
 // Connectivity status tracking (lifted from BriefServerInfo)
 const serverStatuses = reactive<Record<string, LandingScreenServerStatus>>({})
@@ -41,10 +43,25 @@ const checkConnectivity = async (server: Connection) => {
   }
 }
 
-onMounted(() => servers.forEach(checkConnectivity))
+const loadConnections = async () => {
+  isInitializing.value = true
+  initializationError.value = null
+
+  try {
+    const response = await invoke<string>("load_connections")
+    servers.value = JSON.parse(response)
+    servers.value.forEach(checkConnectivity)
+  } catch (e) {
+    initializationError.value = `Failed to load connections: ${e}`
+  } finally {
+    isInitializing.value = false
+  }
+}
+
+onMounted(loadConnections)
 
 const filteredServers = computed(() =>
-  servers.filter((server) => {
+  servers.value.filter((server) => {
     const search = searchFilter.value.toLowerCase()
     if (!search.length) return true
     const name = server.name.toLowerCase()
@@ -73,7 +90,14 @@ const sortedServers = computed(() => {
 const isGrouped = computed(() => sortBy.value === "group")
 
 const mappedServers = computed(() =>
-  Object.groupBy(filteredServers.value, ({ group }) => group),
+  filteredServers.value.reduce<Record<string, Connection[]>>((groups, server) => {
+    const group = server.group || "Ungrouped"
+    if (!groups[group]) {
+      groups[group] = []
+    }
+    groups[group].push(server)
+    return groups
+  }, {}),
 )
 
 const collapsedGroups = reactive<Set<string>>(
@@ -89,7 +113,7 @@ const toggleGroup = (group: string) => {
   localStorage.setItem("launcher-collapsed-groups", JSON.stringify([...collapsedGroups]))
 }
 
-const hasServers = computed(() => servers.length > 0)
+const hasServers = computed(() => servers.value.length > 0)
 const hasResults = computed(() => filteredServers.value.length > 0)
 
 const { trustCertificate } = useConfirmRejectModal()
@@ -164,7 +188,7 @@ const importConnections = async () => {
 }
 
 const refreshStatuses = () => {
-  servers.forEach(checkConnectivity)
+  servers.value.forEach(checkConnectivity)
 }
 
 const { theme, toggle: toggleTheme } = useTheme()
@@ -293,9 +317,33 @@ const deselectAll = () => {
 
     <!-- Server list -->
     <div class="flex-1 overflow-y-auto px-5 pb-5" @click.self="deselectAll">
+      <div
+        v-if="isInitializing"
+        class="flex flex-col items-center justify-center h-full text-center"
+      >
+        <icon name="ph:circle-notch-bold" class="text-3xl text-accent animate-spin mb-3" />
+        <p class="font-medium text-text-secondary">Loading connections...</p>
+      </div>
+
+      <div
+        v-else-if="initializationError"
+        class="flex flex-col items-center justify-center h-full text-center max-w-md mx-auto"
+      >
+        <icon name="ph:warning-circle" class="text-4xl text-danger mb-3" />
+        <p class="font-medium text-text-primary">Ballista couldn't load your connections</p>
+        <p class="text-sm text-text-tertiary mt-1 break-words">{{ initializationError }}</p>
+        <button
+          class="mt-4 flex items-center gap-1.5 px-3 py-1.5 text-sm rounded-md bg-accent text-white hover:bg-accent-hover hover:cursor-pointer transition-colors duration-100"
+          @click="loadConnections"
+        >
+          <icon name="ph:arrow-clockwise-bold" class="text-xs" />
+          Retry
+        </button>
+      </div>
+
       <!-- No servers empty state -->
       <div
-        v-if="!hasServers"
+        v-else-if="!hasServers"
         class="flex flex-col items-center justify-center h-full text-center"
       >
         <icon name="ph:hard-drives" class="text-4xl text-text-disabled mb-3" />

@@ -6,6 +6,7 @@ export interface Connection {
   address: string
   heapSize: string
   icon: string
+  iconDataUrl?: string | null
   id: string
   javaHome: string
   javaArgs: string

@@ -111,14 +111,13 @@ fn get_all_groups(cs: State<ConnectionStore>) -> Result<serde_json::Value, Strin
 
 #[tauri::command]
 fn load_connections(cs: State<ConnectionStore>) -> String {
-    cs.to_json_array_string()
+    cs.to_json_array_string_with_icons()
 }
 
 #[tauri::command]
 fn load_single_connection(cs: State<ConnectionStore>, connection_id: String) -> Result<serde_json::Value, String> {
-    let connection_entry = cs.get(connection_id.as_str())
-        .ok_or_else(|| format!("connection not found: {}", connection_id))?;
-    Ok(serde_json::json!(connection_entry))
+    cs.to_json_value(connection_id.as_str())
+        .ok_or_else(|| format!("connection not found: {}", connection_id))
 }
 
 #[tauri::command]

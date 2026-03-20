@@ -9,13 +9,14 @@ use openssl::x509::store::{X509Store, X509StoreBuilder};
 use openssl::x509::X509;
 use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::ops::Deref;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Arc, Mutex};
 use uuid::Uuid;
@@ -52,6 +53,7 @@ pub struct ConnectionStore {
     con_cache: Mutex<HashMap<String, Arc<ConnectionEntry>>>,
     con_location: PathBuf,
     pub cache_dir: PathBuf,
+    icons_dir: PathBuf,
     cert_store: Mutex<Arc<X509Store>>,
     trusted_certs_location: PathBuf,
 }
@@ -111,12 +113,18 @@ impl ConnectionStore {
             fs::create_dir(&cache_dir)?;
         }
 
+        let icons_dir = data_dir_path.join("icons");
+        if !icons_dir.exists() {
+            fs::create_dir(&icons_dir)?;
+        }
+
         Ok(ConnectionStore {
             con_location,
             con_cache: Mutex::new(cache),
             cert_store: Mutex::new(Arc::new(cert_store)),
             trusted_certs_location,
-            cache_dir
+            cache_dir,
+            icons_dir,
         })
     }
 
@@ -137,6 +145,16 @@ impl ConnectionStore {
         sb
     }
 
+    pub fn to_json_array_string_with_icons(&self) -> String {
+        let cache = self.con_cache.lock().expect("connection cache lock poisoned");
+        let values: Vec<Value> = cache
+            .values()
+            .map(|ce| self.connection_entry_json(ce.as_ref()))
+            .collect();
+
+        serde_json::to_string(&values).unwrap_or_default()
+    }
+
     pub fn get(&self, id: &str) -> Option<Arc<ConnectionEntry>> {
         let cs = self.con_cache.lock().expect("connection cache lock poisoned");
         let val = cs.get(id);
@@ -144,6 +162,11 @@ impl ConnectionStore {
             return Some(Arc::clone(val));
         }
         None
+    }
+
+    pub fn to_json_value(&self, id: &str) -> Option<Value> {
+        let cs = self.con_cache.lock().expect("connection cache lock poisoned");
+        cs.get(id).map(|ce| self.connection_entry_json(ce.as_ref()))
     }
 
     pub fn save(&self, mut ce: ConnectionEntry) -> Result<String, Error> {
@@ -171,6 +194,8 @@ impl ConnectionStore {
             }
         }
 
+        self.prepare_managed_icon(&mut ce)?;
+
         let data = serde_json::to_string(&ce)?;
         self.con_cache
             .lock()
@@ -182,6 +207,7 @@ impl ConnectionStore {
 
     pub fn delete(&self, id: &str) -> Result<(), Error> {
         self.con_cache.lock().expect("connection cache lock poisoned").remove(id);
+        self.remove_managed_icon(id)?;
         self.write_connections_to_disk()?;
         Ok(())
     }
@@ -212,6 +238,7 @@ impl ConnectionStore {
         let java_home = find_java_home();
         for mut ce in data {
             ce.java_home = java_home.clone();
+            self.prepare_managed_icon(&mut ce)?;
             self.con_cache
                 .lock()
                 .expect("connection cache lock poisoned")
@@ -323,6 +350,88 @@ impl ConnectionStore {
 
         Ok(groups)
     }
+
+    fn prepare_managed_icon(&self, ce: &mut ConnectionEntry) -> Result<(), Error> {
+        let icon = ce.icon.trim();
+        if icon.is_empty() {
+            self.remove_managed_icon(&ce.id)?;
+            ce.icon = String::new();
+            return Ok(());
+        }
+
+        let source = Path::new(icon);
+        if !source.is_file() {
+            return Ok(());
+        }
+
+        let extension = source
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .map(|ext| ext.to_ascii_lowercase())
+            .unwrap_or_else(|| String::from("png"));
+
+        self.remove_managed_icon(&ce.id)?;
+        let destination = self.icons_dir.join(format!("{}.{}", ce.id, extension));
+        fs::copy(source, &destination)?;
+        ce.icon = destination.to_string_lossy().to_string();
+        Ok(())
+    }
+
+    fn remove_managed_icon(&self, id: &str) -> Result<(), Error> {
+        if !self.icons_dir.exists() {
+            return Ok(());
+        }
+
+        for entry in fs::read_dir(&self.icons_dir)? {
+            let entry = entry?;
+            let path = entry.path();
+            let Some(stem) = path.file_stem().and_then(|stem| stem.to_str()) else {
+                continue;
+            };
+            if stem == id && path.is_file() {
+                fs::remove_file(path)?;
+            }
+        }
+
+        Ok(())
+    }
+
+    fn connection_entry_json(&self, ce: &ConnectionEntry) -> Value {
+        let mut value = serde_json::to_value(ce).unwrap_or(Value::Null);
+        if let Value::Object(ref mut map) = value {
+            map.insert(
+                String::from("iconDataUrl"),
+                match icon_data_url(&ce.icon) {
+                    Some(data_url) => Value::String(data_url),
+                    None => Value::Null,
+                },
+            );
+        }
+        value
+    }
+}
+
+fn icon_data_url(icon_path: &str) -> Option<String> {
+    let trimmed = icon_path.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    let bytes = fs::read(trimmed).ok()?;
+    let mime_type = match trimmed
+        .rsplit('.')
+        .next()
+        .map(|ext| ext.to_ascii_lowercase())
+    {
+        Some(ext) if ext == "png" => "image/png",
+        Some(ext) if ext == "jpg" || ext == "jpeg" => "image/jpeg",
+        Some(ext) if ext == "gif" => "image/gif",
+        Some(ext) if ext == "icns" => "image/icns",
+        _ => "application/octet-stream",
+    };
+
+    let encoded = openssl::base64::encode_block(&bytes);
+    Some(format!("data:{};base64,{}", mime_type, encoded))
 }
 
 pub fn find_java_home() -> String {

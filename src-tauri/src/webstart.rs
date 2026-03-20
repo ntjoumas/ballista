@@ -213,6 +213,9 @@ impl WebstartFile {
             cmd.arg(format!("-Xmx{}", heap));
         }
 
+        #[cfg(target_os = "macos")]
+        configure_macos_dock(&mut cmd, &ce)?;
+
         if let Some(args) = ce.java_args.as_deref() {
             // Should probably do some sanitization here...
             cmd.args(args.trim().lines());
@@ -323,6 +326,28 @@ impl WebstartFile {
         }
         Ok(())
     }
+}
+
+#[cfg(target_os = "macos")]
+fn configure_macos_dock(cmd: &mut Command, ce: &ConnectionEntry) -> Result<(), Error> {
+    let icon = ce.icon.trim();
+    if !icon.is_empty() {
+        let icon_path = Path::new(icon);
+        if !icon_path.is_file() {
+            return Err(Error::msg(format!(
+                "configured dock icon was not found: {}",
+                icon
+            )));
+        }
+        cmd.arg(format!("-Xdock:icon={}", icon));
+    }
+
+    let name = ce.name.trim();
+    if !name.is_empty() {
+        cmd.arg(format!("-Xdock:name={}", name));
+    }
+
+    Ok(())
 }
 
 fn download_jars(

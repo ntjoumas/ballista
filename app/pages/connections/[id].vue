@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import type { Connection } from "~/types"
 import { invoke } from "@tauri-apps/api/core"
-import { ask } from "@tauri-apps/plugin-dialog"
+import { ask, open } from "@tauri-apps/plugin-dialog"
 
 const route = useRoute()
 const connectionId = route.params.id
@@ -28,6 +28,24 @@ watch(
 )
 
 const errorMessage = ref<string | null>(null)
+
+const selectIcon = async () => {
+  const selected = await open({
+    title: "Choose Dock Icon",
+    filters: [
+      { name: "Images", extensions: ["png", "jpg", "jpeg", "icns", "gif"] },
+    ],
+    multiple: false,
+  })
+
+  if (typeof selected === "string") {
+    server.value.icon = selected
+  }
+}
+
+const clearIcon = () => {
+  server.value.icon = ""
+}
 
 const handleSave = async () => {
   try {
@@ -111,6 +129,36 @@ const handleDelete = async () => {
           <div class="space-y-1">
             <label class="block text-sm font-medium text-text-secondary select-none">Group</label>
             <insertable-dropdown :options="groups" v-model="server.group" />
+          </div>
+          <div class="space-y-2">
+            <label class="block text-sm font-medium text-text-secondary select-none">Dock Icon</label>
+            <div class="flex items-center gap-2">
+              <input
+                type="text"
+                readonly
+                :value="server.icon"
+                placeholder="Optional image file for the macOS dock"
+                class="w-full bg-surface-1 border border-border rounded-md px-2.5 py-1.5 text-sm text-text-primary placeholder:text-text-disabled outline-none"
+              />
+              <button
+                type="button"
+                @click="selectIcon"
+                class="px-3 py-1.5 text-sm rounded-md border border-border bg-surface-1 text-text-secondary hover:text-text-primary hover:bg-surface-2 hover:cursor-pointer transition-colors duration-100"
+              >
+                Browse
+              </button>
+              <button
+                v-if="server.icon"
+                type="button"
+                @click="clearIcon"
+                class="px-3 py-1.5 text-sm rounded-md text-text-secondary hover:bg-surface-2 hover:text-text-primary hover:cursor-pointer transition-colors duration-100"
+              >
+                Clear
+              </button>
+            </div>
+            <p class="text-xs text-text-tertiary">
+              Used for the launched administrator's macOS dock icon. PNG and ICNS files work best.
+            </p>
           </div>
           <connection-input type="text" label="Heap Size" placeholder="512m" v-model="server.heapSize" />
           <connection-input type="text" label="Notes" placeholder="Optional notes" v-model="server.notes" />
