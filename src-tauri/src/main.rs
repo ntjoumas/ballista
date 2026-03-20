@@ -15,7 +15,7 @@ use tauri::ipc::Channel;
 use tauri::{AppHandle, Manager, State};
 
 use crate::connection::{ConnectionEntry, ConnectionStore};
-use crate::webstart::{WebStartCache, WebstartFile};
+use crate::webstart::{clear_connection_cache, WebStartCache, WebstartFile};
 
 mod connection;
 mod errors;
@@ -133,6 +133,22 @@ fn delete(id: &str, cs: State<ConnectionStore>) -> Result<String, String> {
     Ok(String::from("success"))
 }
 
+#[tauri::command]
+fn clear_cache(id: &str, cs: State<ConnectionStore>, wc: State<WebStartCache>) -> Result<String, String> {
+    let ce = cs
+        .get(id)
+        .ok_or_else(|| format!("connection not found: {}", id))?;
+
+    wc.remove(&ce.address);
+    let removed = clear_connection_cache(&cs.cache_dir, &ce.id).map_err(|e| e.to_string())?;
+
+    Ok(serde_json::json!({
+        "status": "ok",
+        "removed": removed,
+    })
+    .to_string())
+}
+
 #[tauri::command(rename_all = "snake_case")]
 fn import(file_path: &str, overwrite: bool, cs: State<ConnectionStore>) -> Result<String, String> {
     cs.import(file_path, overwrite).map_err(|e| e.to_string())
@@ -194,6 +210,7 @@ fn main() {
             launch,
             import,
             delete,
+            clear_cache,
             save,
             get_default_connectionentry,
             get_all_groups,

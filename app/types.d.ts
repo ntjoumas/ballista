@@ -15,9 +15,13 @@ export interface Connection {
   password: string
   verify: boolean
   group: string
+  environment: string
   notes: string
   donotcache: boolean
   lastConnected: number | null
+  groupOrder: number
+  environmentOrder: number
+  sortOrder: number
   showConsole: boolean
 
   // the below properties are transient and are used only in the UI

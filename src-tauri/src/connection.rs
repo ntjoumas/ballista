@@ -39,12 +39,20 @@ pub struct ConnectionEntry {
     pub verify: bool,
     #[serde(default = "get_default_group")]
     pub group: String,
+    #[serde(default = "get_default_environment")]
+    pub environment: String,
     #[serde(default = "get_default_notes")]
     pub notes: String,
     #[serde(default = "get_default_donotcache")]
     pub donotcache: bool,
     #[serde(default, rename = "lastConnected")]
     pub last_connected: Option<i64>,
+    #[serde(default, rename = "groupOrder")]
+    pub group_order: i64,
+    #[serde(default, rename = "environmentOrder")]
+    pub environment_order: i64,
+    #[serde(default, rename = "sortOrder")]
+    pub sort_order: i64,
     #[serde(default, rename = "showConsole")]
     pub show_console: bool,
 }
@@ -73,9 +81,13 @@ impl Default for ConnectionEntry {
             password: None,
             verify: true,
             group: get_default_group(),
+            environment: get_default_environment(),
             notes: get_default_notes(),
             donotcache: get_default_donotcache(),
             last_connected: None,
+            group_order: 0,
+            environment_order: 0,
+            sort_order: 0,
             show_console: false,
         }
     }
@@ -170,7 +182,8 @@ impl ConnectionStore {
     }
 
     pub fn save(&self, mut ce: ConnectionEntry) -> Result<String, Error> {
-        if ce.id.is_empty() {
+        let is_new = ce.id.is_empty();
+        if is_new {
             ce.id = uuid::Uuid::new_v4().to_string();
         }
 
@@ -196,11 +209,60 @@ impl ConnectionStore {
 
         self.prepare_managed_icon(&mut ce)?;
 
-        let data = serde_json::to_string(&ce)?;
-        self.con_cache
+        let mut cache = self
+            .con_cache
             .lock()
-            .expect("connection cache lock poisoned")
-            .insert(ce.id.clone(), Arc::new(ce));
+            .expect("connection cache lock poisoned");
+        let is_existing = cache.contains_key(&ce.id);
+        let group_name = ce.group.trim().to_string();
+        let environment_name = ce.environment.trim().to_string();
+
+        if (!is_existing || is_new) && ce.group_order == 0 {
+            ce.group_order = cache
+                .values()
+                .find(|entry| entry.group.trim() == group_name)
+                .map(|entry| entry.group_order)
+                .unwrap_or_else(|| {
+                    cache.values()
+                        .map(|entry| entry.group_order)
+                        .max()
+                        .unwrap_or(-1)
+                        + 1
+                });
+        }
+
+        if (!is_existing || is_new) && ce.environment_order == 0 {
+            ce.environment_order = cache
+                .values()
+                .find(|entry| {
+                    entry.group.trim() == group_name && entry.environment.trim() == environment_name
+                })
+                .map(|entry| entry.environment_order)
+                .unwrap_or_else(|| {
+                    cache.values()
+                        .filter(|entry| entry.group.trim() == group_name)
+                        .map(|entry| entry.environment_order)
+                        .max()
+                        .unwrap_or(-1)
+                        + 1
+                });
+        }
+
+        if (!is_existing || is_new) && ce.sort_order == 0 {
+            ce.sort_order = cache
+                .values()
+                .filter(|entry| {
+                    entry.group.trim() == group_name && entry.environment.trim() == environment_name
+                })
+                .map(|entry| entry.sort_order)
+                .max()
+                .unwrap_or(-1)
+                + 1;
+        }
+
+        let data = serde_json::to_string(&ce)?;
+        cache.insert(ce.id.clone(), Arc::new(ce));
+        drop(cache);
         self.write_connections_to_disk()?;
         Ok(data)
     }
@@ -370,8 +432,13 @@ impl ConnectionStore {
             .map(|ext| ext.to_ascii_lowercase())
             .unwrap_or_else(|| String::from("png"));
 
-        self.remove_managed_icon(&ce.id)?;
         let destination = self.icons_dir.join(format!("{}.{}", ce.id, extension));
+        if source == destination {
+            ce.icon = destination.to_string_lossy().to_string();
+            return Ok(());
+        }
+
+        self.remove_managed_icon(&ce.id)?;
         fs::copy(source, &destination)?;
         ce.icon = destination.to_string_lossy().to_string();
         Ok(())
@@ -537,6 +604,10 @@ fn get_default_group() -> String {
 }
 
 fn get_default_notes() -> String {
+    String::from("")
+}
+
+fn get_default_environment() -> String {
     String::from("")
 }
 

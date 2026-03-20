@@ -15,6 +15,8 @@ const props = defineProps<{
   server: Connection
   selected: boolean
   status?: LandingScreenServerStatus
+  reorderEnabled?: boolean
+  reorderTarget?: boolean
 }>()
 
 const emit = defineEmits(["select", "launch", "edit"])
@@ -52,12 +54,22 @@ const iconSrc = computed(() => props.server.iconDataUrl ?? null)
 
 <template>
   <div
-    class="flex items-center justify-between rounded-md px-2 py-1.5 transition-colors duration-[120ms] hover:cursor-pointer group"
-    :class="selected ? 'bg-surface-2' : 'hover:bg-surface-2'"
+    class="relative flex items-center justify-between rounded-md px-2 py-1.5 transition-colors duration-[120ms] hover:cursor-pointer group"
+    :class="[
+      selected ? 'bg-surface-2' : 'hover:bg-surface-2',
+      reorderTarget ? 'before:absolute before:left-2 before:right-2 before:top-0 before:h-0.5 before:rounded-full before:bg-accent' : '',
+    ]"
     @click="emit('select')"
     @dblclick="emit('launch')"
   >
     <section class="flex-1 flex items-center gap-3 min-w-0">
+      <div
+        v-if="reorderEnabled"
+        class="flex-none flex items-center justify-center size-6 rounded-md text-text-disabled cursor-grab active:cursor-grabbing"
+        @mousedown.stop="$emit('reorder-start', $event)"
+      >
+        <icon name="ph:dots-six-vertical-bold" class="text-sm" />
+      </div>
       <div
         v-if="iconSrc"
         class="flex-none size-8 rounded-md overflow-hidden border border-border bg-surface-1"

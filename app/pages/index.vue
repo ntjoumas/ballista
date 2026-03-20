@@ -7,6 +7,25 @@ import { ask, open } from "@tauri-apps/plugin-dialog"
 import { open as shellOpen } from "@tauri-apps/plugin-shell"
 
 type SortMode = "group" | "name" | "lastConnected" | "status"
+type EnvironmentBucket = {
+  key: string
+  label: string
+  order: number
+  servers: Connection[]
+}
+type GroupBucket = {
+  name: string
+  order: number
+  environments: EnvironmentBucket[]
+}
+type DragState =
+  | { kind: "group", groupName: string }
+  | { kind: "environment", groupName: string, environmentKey: string }
+  | { kind: "server", groupName: string, environmentKey: string, serverId: string }
+type DropTarget =
+  | { kind: "group", groupName: string }
+  | { kind: "environment", groupName: string, environmentKey: string }
+  | { kind: "server", groupName: string, environmentKey: string, serverId: string }
 
 const isLoading = ref<boolean>(false)
 const isInitializing = ref<boolean>(true)
@@ -17,6 +36,23 @@ const searchFilter = ref<string>("")
 const selectedServerId = ref<string | null>(null)
 const sortBy = ref<SortMode>((localStorage.getItem("launcher-sort") as SortMode) || "group")
 const showSortMenu = ref(false)
+const isPersistingOrder = ref(false)
+const dragging = ref<DragState | null>(null)
+const dropTarget = ref<DropTarget | null>(null)
+
+const isGroupTarget = (groupName: string) =>
+  dropTarget.value?.kind === "group" && dropTarget.value.groupName === groupName
+
+const isEnvironmentTarget = (groupName: string, environmentKey: string) =>
+  dropTarget.value?.kind === "environment"
+  && dropTarget.value.groupName === groupName
+  && dropTarget.value.environmentKey === environmentKey
+
+const isServerTarget = (groupName: string, environmentKey: string, serverId: string) =>
+  dropTarget.value?.kind === "server"
+  && dropTarget.value.groupName === groupName
+  && dropTarget.value.environmentKey === environmentKey
+  && dropTarget.value.serverId === serverId
 
 watch(sortBy, (v) => {
   localStorage.setItem("launcher-sort", v)
@@ -24,6 +60,13 @@ watch(sortBy, (v) => {
 })
 
 const servers = ref<Connection[]>([])
+
+const sortByManualOrder = (a: Connection, b: Connection) =>
+  (a.sortOrder ?? 0) - (b.sortOrder ?? 0) || a.name.localeCompare(b.name)
+const sortByGroupOrder = (a: GroupBucket, b: GroupBucket) =>
+  a.order - b.order || a.name.localeCompare(b.name)
+const sortByEnvironmentOrder = (a: EnvironmentBucket, b: EnvironmentBucket) =>
+  a.order - b.order || a.label.localeCompare(b.label)
 
 // Connectivity status tracking (lifted from BriefServerInfo)
 const serverStatuses = reactive<Record<string, LandingScreenServerStatus>>({})
@@ -59,6 +102,12 @@ const loadConnections = async () => {
 }
 
 onMounted(loadConnections)
+onMounted(() => {
+  window.addEventListener("mouseup", finishReorder)
+})
+onUnmounted(() => {
+  window.removeEventListener("mouseup", finishReorder)
+})
 
 const filteredServers = computed(() =>
   servers.value.filter((server) => {
@@ -83,26 +132,70 @@ const sortedServers = computed(() => {
         return (order[serverStatuses[a.id] ?? 2] ?? 2) - (order[serverStatuses[b.id] ?? 2] ?? 2)
       })
     default:
-      return list
+      return list.sort(sortByManualOrder)
   }
 })
 
 const isGrouped = computed(() => sortBy.value === "group")
 
-const mappedServers = computed(() =>
-  filteredServers.value.reduce<Record<string, Connection[]>>((groups, server) => {
-    const group = server.group || "Ungrouped"
-    if (!groups[group]) {
-      groups[group] = []
+const groupedServers = computed<GroupBucket[]>(() => {
+  const groups = new Map<string, { order: number, environments: Map<string, EnvironmentBucket> }>()
+
+  for (const server of filteredServers.value) {
+    const groupName = server.group?.trim() || "Ungrouped"
+    const environmentName = server.environment?.trim() || ""
+    const environmentKey = environmentName || "__default__"
+
+    if (!groups.has(groupName)) {
+      groups.set(groupName, {
+        order: server.groupOrder ?? 0,
+        environments: new Map<string, EnvironmentBucket>(),
+      })
     }
-    groups[group].push(server)
-    return groups
-  }, {}),
-)
+
+    const group = groups.get(groupName)!
+    group.order = Math.min(group.order, server.groupOrder ?? group.order)
+
+    if (!group.environments.has(environmentKey)) {
+      group.environments.set(environmentKey, {
+        key: environmentKey,
+        label: environmentName || "General",
+        order: server.environmentOrder ?? 0,
+        servers: [],
+      })
+    }
+
+    const environment = group.environments.get(environmentKey)!
+    environment.order = Math.min(environment.order, server.environmentOrder ?? environment.order)
+    environment.servers.push(server)
+  }
+
+  return [...groups.entries()]
+    .map(([name, group]) => ({
+      name,
+      order: group.order,
+      environments: [...group.environments.values()]
+        .map((environment) => ({
+          ...environment,
+          servers: [...environment.servers].sort(sortByManualOrder),
+        }))
+        .sort(sortByEnvironmentOrder),
+    }))
+    .sort(sortByGroupOrder)
+})
+
+const hasNamedEnvironment = (environment: EnvironmentBucket) =>
+  environment.key !== "__default__"
 
 const collapsedGroups = reactive<Set<string>>(
   new Set(JSON.parse(localStorage.getItem("launcher-collapsed-groups") || "[]")),
 )
+const collapsedEnvironments = reactive<Set<string>>(
+  new Set(JSON.parse(localStorage.getItem("launcher-collapsed-environments") || "[]")),
+)
+
+const environmentCollapseKey = (groupName: string, environmentKey: string) =>
+  `${groupName}::${environmentKey}`
 
 const toggleGroup = (group: string) => {
   if (collapsedGroups.has(group)) {
@@ -113,8 +206,173 @@ const toggleGroup = (group: string) => {
   localStorage.setItem("launcher-collapsed-groups", JSON.stringify([...collapsedGroups]))
 }
 
+const toggleEnvironment = (groupName: string, environmentKey: string) => {
+  const key = environmentCollapseKey(groupName, environmentKey)
+  if (collapsedEnvironments.has(key)) {
+    collapsedEnvironments.delete(key)
+  } else {
+    collapsedEnvironments.add(key)
+  }
+  localStorage.setItem("launcher-collapsed-environments", JSON.stringify([...collapsedEnvironments]))
+}
+
 const hasServers = computed(() => servers.value.length > 0)
 const hasResults = computed(() => filteredServers.value.length > 0)
+const canReorder = computed(() => sortBy.value === "group" && !searchFilter.value.trim().length && !isPersistingOrder.value)
+
+const applyGroupOrder = (groupNames: string[]) => {
+  for (const [index, groupName] of groupNames.entries()) {
+    for (const server of servers.value) {
+      if ((server.group?.trim() || "Ungrouped") === groupName) {
+        server.groupOrder = index
+      }
+    }
+  }
+}
+
+const applyEnvironmentOrder = (groupName: string, environmentKeys: string[]) => {
+  for (const [index, environmentKey] of environmentKeys.entries()) {
+    for (const server of servers.value) {
+      if ((server.group?.trim() || "Ungrouped") === groupName && ((server.environment?.trim() || "__default__") === environmentKey)) {
+        server.environmentOrder = index
+      }
+    }
+  }
+}
+
+const applyServerOrder = (groupName: string, environmentKey: string, serverIds: string[]) => {
+  for (const [index, serverId] of serverIds.entries()) {
+    const server = servers.value.find((item) => item.id === serverId)
+    if (server && (server.group?.trim() || "Ungrouped") === groupName && ((server.environment?.trim() || "__default__") === environmentKey)) {
+      server.sortOrder = index
+    }
+  }
+}
+
+const persistOrder = async () => {
+  isPersistingOrder.value = true
+  launchError.value = null
+  try {
+    for (const server of servers.value) {
+      await invoke("save", { ce: JSON.stringify(server) })
+    }
+  } catch (e) {
+    launchError.value = `Saving server order failed: ${e}`
+  } finally {
+    isPersistingOrder.value = false
+  }
+}
+
+const moveGroup = (draggedGroupName: string, targetGroupName: string) => {
+  if (draggedGroupName === targetGroupName) return
+
+  const reordered = groupedServers.value.map((group) => group.name)
+  const draggedIndex = reordered.findIndex((groupName) => groupName === draggedGroupName)
+  const targetIndex = reordered.findIndex((groupName) => groupName === targetGroupName)
+  if (draggedIndex < 0 || targetIndex < 0) return
+
+  const [moved] = reordered.splice(draggedIndex, 1)
+  reordered.splice(targetIndex, 0, moved)
+  applyGroupOrder(reordered)
+}
+
+const moveEnvironment = (groupName: string, draggedEnvironmentKey: string, targetEnvironmentKey: string) => {
+  if (draggedEnvironmentKey === targetEnvironmentKey) return
+
+  const environments = groupedServers.value.find((group) => group.name === groupName)?.environments
+  if (!environments) return
+
+  const reordered = [...environments]
+  const draggedIndex = reordered.findIndex((environment) => environment.key === draggedEnvironmentKey)
+  const targetIndex = reordered.findIndex((environment) => environment.key === targetEnvironmentKey)
+  if (draggedIndex < 0 || targetIndex < 0) return
+
+  const [moved] = reordered.splice(draggedIndex, 1)
+  reordered.splice(targetIndex, 0, moved)
+  applyEnvironmentOrder(groupName, reordered.map((environment) => environment.key))
+}
+
+const moveServerWithinBucket = (draggedId: string, targetId: string, groupName: string, environmentKey: string) => {
+  if (draggedId === targetId) return
+
+  const bucketServers = groupedServers.value
+    .find((group) => group.name === groupName)
+    ?.environments.find((environment) => environment.key === environmentKey)
+    ?.servers
+
+  if (!bucketServers) return
+
+  const draggedIndex = bucketServers.findIndex((server) => server.id === draggedId)
+  const targetIndex = bucketServers.findIndex((server) => server.id === targetId)
+  if (draggedIndex < 0 || targetIndex < 0) return
+
+  const reordered = [...bucketServers]
+  const [moved] = reordered.splice(draggedIndex, 1)
+  reordered.splice(targetIndex, 0, moved)
+  applyServerOrder(groupName, environmentKey, reordered.map((server) => server.id))
+}
+
+const handleGroupPointerDown = (event: MouseEvent, groupName: string) => {
+  if (!canReorder.value || event.button !== 0) return
+  event.preventDefault()
+  dragging.value = { kind: "group", groupName }
+  dropTarget.value = { kind: "group", groupName }
+}
+
+const handleEnvironmentPointerDown = (event: MouseEvent, groupName: string, environmentKey: string) => {
+  if (!canReorder.value || event.button !== 0) return
+  event.preventDefault()
+  dragging.value = { kind: "environment", groupName, environmentKey }
+  dropTarget.value = { kind: "environment", groupName, environmentKey }
+}
+
+const handleServerPointerDown = (event: MouseEvent, serverId: string, groupName: string, environmentKey: string) => {
+  if (!canReorder.value || event.button !== 0) return
+  event.preventDefault()
+  dragging.value = { kind: "server", groupName, environmentKey, serverId }
+  dropTarget.value = { kind: "server", groupName, environmentKey, serverId }
+}
+
+const handleGroupHover = (targetGroupName: string) => {
+  if (!dragging.value || dragging.value.kind !== "group") return
+  dropTarget.value = { kind: "group", groupName: targetGroupName }
+}
+
+const handleEnvironmentHover = (groupName: string, targetEnvironmentKey: string) => {
+  if (!dragging.value || dragging.value.kind !== "environment" || dragging.value.groupName !== groupName) return
+  dropTarget.value = { kind: "environment", groupName, environmentKey: targetEnvironmentKey }
+}
+
+const handleServerHover = (targetId: string, groupName: string, environmentKey: string) => {
+  if (!dragging.value || dragging.value.kind !== "server" || dragging.value.groupName !== groupName || dragging.value.environmentKey !== environmentKey) return
+  dropTarget.value = { kind: "server", groupName, environmentKey, serverId: targetId }
+}
+
+const finishReorder = async () => {
+  if (dragging.value && dropTarget.value) {
+    if (dragging.value.kind === "group" && dropTarget.value.kind === "group") {
+      moveGroup(dragging.value.groupName, dropTarget.value.groupName)
+      await persistOrder()
+    } else if (
+      dragging.value.kind === "environment"
+      && dropTarget.value.kind === "environment"
+      && dragging.value.groupName === dropTarget.value.groupName
+    ) {
+      moveEnvironment(dragging.value.groupName, dragging.value.environmentKey, dropTarget.value.environmentKey)
+      await persistOrder()
+    } else if (
+      dragging.value.kind === "server"
+      && dropTarget.value.kind === "server"
+      && dragging.value.groupName === dropTarget.value.groupName
+      && dragging.value.environmentKey === dropTarget.value.environmentKey
+    ) {
+      moveServerWithinBucket(dragging.value.serverId, dropTarget.value.serverId, dragging.value.groupName, dragging.value.environmentKey)
+      await persistOrder()
+    }
+  }
+  dragging.value = null
+  dropTarget.value = null
+}
 
 const { trustCertificate } = useConfirmRejectModal()
 const handleLaunchClick = (connection: Connection) => {
@@ -315,6 +573,13 @@ const deselectAll = () => {
       </div>
     </div>
 
+    <div
+      v-if="sortBy === 'group'"
+      class="px-5 pb-2 text-[11px] text-text-disabled"
+    >
+      {{ searchFilter.trim().length ? "Clear search to drag groups, environments, and servers into a saved order." : "Drag groups, environments, and servers to reorder them." }}
+    </div>
+
     <!-- Server list -->
     <div class="flex-1 overflow-y-auto px-5 pb-5" @click.self="deselectAll">
       <div
@@ -373,34 +638,87 @@ const deselectAll = () => {
       <!-- Server groups (grouped mode) -->
       <div v-else-if="isGrouped" class="space-y-4" @click.self="deselectAll">
         <div
-          v-for="[group, groupServers] of Object.entries(mappedServers || {})"
-          :key="group"
+          v-for="group in groupedServers"
+          :key="group.name"
+          @mouseenter="handleGroupHover(group.name)"
           @click.self="deselectAll"
         >
           <button
-            class="flex items-center gap-1.5 text-xs font-medium text-text-tertiary uppercase tracking-wider px-2 mb-1 hover:text-text-secondary transition-colors duration-100 hover:cursor-pointer"
-            @click="toggleGroup(group)"
+            class="relative flex items-center gap-1.5 w-full text-xs font-medium text-text-tertiary uppercase tracking-wider px-2 mb-1 rounded-md hover:text-text-secondary transition-colors duration-100 hover:cursor-pointer"
+            :class="[
+              isGroupTarget(group.name) ? 'before:absolute before:left-2 before:right-2 before:top-0 before:h-0.5 before:rounded-full before:bg-accent' : '',
+            ]"
+            @click="toggleGroup(group.name)"
           >
+            <span
+              v-if="canReorder"
+              class="flex-none flex items-center justify-center size-5 rounded text-text-disabled cursor-grab active:cursor-grabbing"
+              @mousedown.stop="handleGroupPointerDown($event, group.name)"
+            >
+              <icon name="ph:dots-six-vertical-bold" class="text-sm" />
+            </span>
             <icon
               name="ph:caret-right-bold"
               class="text-[10px] transition-transform duration-150"
-              :class="collapsedGroups.has(group) ? '' : 'rotate-90'"
+              :class="collapsedGroups.has(group.name) ? '' : 'rotate-90'"
             />
-            {{ group }}
-            <span class="normal-case tracking-normal font-normal">({{ groupServers?.length ?? 0 }})</span>
+            {{ group.name }}
+            <span class="normal-case tracking-normal font-normal">({{ group.environments.reduce((count, environment) => count + environment.servers.length, 0) }})</span>
           </button>
 
-          <div v-if="!collapsedGroups.has(group)" class="space-y-px">
-            <brief-server-info
-              v-for="server in groupServers"
-              :key="server.id"
-              :server="server"
-              :status="serverStatuses[server.id]"
-              :selected="selectedServerId === server.id"
-              @select="selectedServerId = server.id"
-              @launch="handleLaunchClick(server)"
-              @edit="openSettings(server)"
-            />
+          <div v-if="!collapsedGroups.has(group.name)" class="space-y-2">
+            <div
+              v-for="environment in group.environments"
+              :key="`${group.name}-${environment.key}`"
+              :class="hasNamedEnvironment(environment) ? 'pl-4' : ''"
+            >
+              <button
+                v-if="hasNamedEnvironment(environment)"
+                class="relative flex items-center gap-1.5 w-full px-2 mb-1 rounded-md text-[11px] font-medium uppercase tracking-wider text-text-disabled hover:text-text-tertiary transition-colors duration-100 hover:cursor-pointer"
+                :class="[
+                  isEnvironmentTarget(group.name, environment.key) ? 'before:absolute before:left-2 before:right-2 before:top-0 before:h-0.5 before:rounded-full before:bg-accent' : '',
+                ]"
+                @mouseenter="handleEnvironmentHover(group.name, environment.key)"
+                @click="toggleEnvironment(group.name, environment.key)"
+              >
+                <span
+                  v-if="canReorder"
+                  class="flex-none flex items-center justify-center size-5 rounded text-text-disabled cursor-grab active:cursor-grabbing"
+                  @mousedown.stop="handleEnvironmentPointerDown($event, group.name, environment.key)"
+                >
+                  <icon name="ph:dots-six-vertical-bold" class="text-sm" />
+                </span>
+                <icon
+                  name="ph:caret-right-bold"
+                  class="text-[9px] transition-transform duration-150"
+                  :class="collapsedEnvironments.has(environmentCollapseKey(group.name, environment.key)) ? '' : 'rotate-90'"
+                />
+                {{ environment.label }}
+                <span class="normal-case tracking-normal font-normal">({{ environment.servers.length }})</span>
+              </button>
+              <div
+                v-if="!hasNamedEnvironment(environment) || !collapsedEnvironments.has(environmentCollapseKey(group.name, environment.key))"
+                :class="hasNamedEnvironment(environment) ? 'space-y-px pl-3' : 'space-y-px'"
+              >
+                <div
+                  v-for="server in environment.servers"
+                  :key="server.id"
+                  @mouseenter="handleServerHover(server.id, group.name, environment.key)"
+                >
+                  <brief-server-info
+                    :server="server"
+                    :status="serverStatuses[server.id]"
+                    :selected="selectedServerId === server.id"
+                    :reorder-enabled="canReorder"
+                    :reorder-target="isServerTarget(group.name, environment.key, server.id)"
+                    @select="selectedServerId = server.id"
+                    @launch="handleLaunchClick(server)"
+                    @edit="openSettings(server)"
+                    @reorder-start="handleServerPointerDown($event, server.id, group.name, environment.key)"
+                  />
+                </div>
+              </div>
+            </div>
           </div>
         </div>
       </div>

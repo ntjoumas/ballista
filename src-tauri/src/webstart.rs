@@ -67,6 +67,13 @@ impl WebStartCache {
         }
         None
     }
+
+    pub fn remove(&self, url: &str) {
+        self.cache
+            .lock()
+            .expect("webstart cache lock poisoned")
+            .remove(url);
+    }
 }
 
 impl WebstartFile {
@@ -523,6 +530,35 @@ fn has_file_changed(jar_file_path: &Path, hash_in_jnlp: Option<&str>) -> Result<
     }
 
     Ok(true)
+}
+
+pub fn clear_connection_cache(cache_dir: &Path, conn_id: &str) -> Result<usize, Error> {
+    if !cache_dir.exists() {
+        return Ok(0);
+    }
+
+    let id_prefix = &conn_id[..conn_id.len().min(8)];
+    let suffix = format!("_{}", id_prefix);
+    let mut removed = 0usize;
+
+    for entry in std::fs::read_dir(cache_dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+
+        let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+
+        if name.ends_with(&suffix) {
+            std::fs::remove_dir_all(&path)?;
+            removed += 1;
+        }
+    }
+
+    Ok(removed)
 }
 #[cfg(test)]
 mod tests {

@@ -28,6 +28,7 @@ watch(
 )
 
 const errorMessage = ref<string | null>(null)
+const infoMessage = ref<string | null>(null)
 
 const selectIcon = async () => {
   const selected = await open({
@@ -49,6 +50,7 @@ const clearIcon = () => {
 
 const handleSave = async () => {
   try {
+    infoMessage.value = null
     await invoke("save", { ce: JSON.stringify(server.value) })
     navigateTo("/")
   } catch (e) {
@@ -75,10 +77,57 @@ const handleDelete = async () => {
   if (!confirmed) return
 
   try {
+    infoMessage.value = null
     await invoke("delete", { id: server.value.id })
     navigateTo("/")
   } catch (e) {
     errorMessage.value = `Delete failed: ${e}`
+  }
+}
+
+const handleCopy = async () => {
+  const confirmed = await ask(
+    `Create a copy of ${server.value.name}?`,
+    { title: "Copy Connection?", kind: "info" },
+  )
+  if (!confirmed) return
+
+  try {
+    errorMessage.value = null
+    infoMessage.value = null
+
+    const copy: Connection = {
+      ...server.value,
+      id: "",
+      name: server.value.name ? `${server.value.name} Copy` : "Connection Copy",
+      lastConnected: null,
+      sortOrder: 0,
+    }
+
+    const response = await invoke<string>("save", { ce: JSON.stringify(copy) })
+    const savedCopy: Connection = JSON.parse(response)
+    navigateTo(`/connections/${savedCopy.id}`)
+  } catch (e) {
+    errorMessage.value = `Copy failed: ${e}`
+  }
+}
+
+const handleClearCache = async () => {
+  const confirmed = await ask(
+    `Clear cached launcher files for ${server.value.name}? The next launch will download a fresh copy.`,
+    { title: "Clear Cache?", kind: "warning" },
+  )
+  if (!confirmed) return
+
+  try {
+    errorMessage.value = null
+    const response = await invoke<string>("clear_cache", { id: server.value.id })
+    const result = JSON.parse(response)
+    infoMessage.value = result.removed > 0
+      ? `Cleared ${result.removed} cached launcher folder${result.removed === 1 ? "" : "s"}.`
+      : "No cached launcher files were found for this server."
+  } catch (e) {
+    errorMessage.value = `Clear cache failed: ${e}`
   }
 }
 </script>
@@ -130,6 +179,7 @@ const handleDelete = async () => {
             <label class="block text-sm font-medium text-text-secondary select-none">Group</label>
             <insertable-dropdown :options="groups" v-model="server.group" />
           </div>
+          <connection-input type="text" label="Environment" placeholder="Optional subgroup, e.g. Prod or QA" v-model="server.environment" />
           <div class="space-y-2">
             <label class="block text-sm font-medium text-text-secondary select-none">Dock Icon</label>
             <div class="flex items-center gap-2">
@@ -182,6 +232,10 @@ const handleDelete = async () => {
     </div>
 
     <!-- Error message -->
+    <div v-if="infoMessage" class="flex-none px-5 py-2 bg-accent/10 border-t border-accent/30">
+      <p class="text-sm text-text-primary">{{ infoMessage }}</p>
+    </div>
+
     <div v-if="errorMessage" class="flex-none px-5 py-2 bg-danger/10 border-t border-danger/30">
       <p class="text-sm text-danger">{{ errorMessage }}</p>
     </div>
@@ -195,6 +249,20 @@ const handleDelete = async () => {
         Cancel
       </button>
       <div class="flex items-center gap-2">
+        <button
+          v-if="!isNewConnection"
+          @click="handleCopy"
+          class="px-3 py-1.5 text-sm rounded-md text-text-secondary hover:bg-surface-2 hover:cursor-pointer transition-colors duration-100"
+        >
+          Copy
+        </button>
+        <button
+          v-if="!isNewConnection"
+          @click="handleClearCache"
+          class="px-3 py-1.5 text-sm rounded-md text-text-secondary hover:bg-surface-2 hover:cursor-pointer transition-colors duration-100"
+        >
+          Clear Cache
+        </button>
         <button
           v-if="!isNewConnection"
           @click="handleDelete"
