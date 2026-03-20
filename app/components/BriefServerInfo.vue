@@ -19,7 +19,7 @@ const props = defineProps<{
   reorderTarget?: boolean
 }>()
 
-const emit = defineEmits(["select", "launch", "edit"])
+const emit = defineEmits(["select", "launch", "edit", "reorder-start"])
 
 const avatarColor = computed(() => {
   let hash = 0

@@ -3,7 +3,7 @@ import type { Connection } from "~/types"
 import { LandingScreenServerStatus } from "~/enums"
 import { Channel, invoke } from "@tauri-apps/api/core"
 import { fetch as tauriFetch } from "@tauri-apps/plugin-http"
-import { ask, open } from "@tauri-apps/plugin-dialog"
+import { ask, open, save as saveDialog } from "@tauri-apps/plugin-dialog"
 import { open as shellOpen } from "@tauri-apps/plugin-shell"
 
 type SortMode = "group" | "name" | "lastConnected" | "status"
@@ -17,6 +17,14 @@ type GroupBucket = {
   name: string
   order: number
   environments: EnvironmentBucket[]
+}
+type ImportDraft = Connection & {
+  importKey: string
+  selected: boolean
+}
+type ExportDraft = Connection & {
+  exportKey: string
+  selected: boolean
 }
 type DragState =
   | { kind: "group", groupName: string }
@@ -32,6 +40,7 @@ const isInitializing = ref<boolean>(true)
 const initializationError = ref<string | null>(null)
 const progressMessage = ref<string>("Connecting...")
 const launchError = ref<string | null>(null)
+const actionMessage = ref<string | null>(null)
 const searchFilter = ref<string>("")
 const selectedServerId = ref<string | null>(null)
 const sortBy = ref<SortMode>((localStorage.getItem("launcher-sort") as SortMode) || "group")
@@ -39,6 +48,15 @@ const showSortMenu = ref(false)
 const isPersistingOrder = ref(false)
 const dragging = ref<DragState | null>(null)
 const dropTarget = ref<DropTarget | null>(null)
+const showImportModal = ref(false)
+const isImporting = ref(false)
+const importSourceLabel = ref("")
+const importDrafts = ref<ImportDraft[]>([])
+const bulkImportUsername = ref("")
+const bulkImportPassword = ref("")
+const showExportModal = ref(false)
+const isExporting = ref(false)
+const exportDrafts = ref<ExportDraft[]>([])
 
 const isGroupTarget = (groupName: string) =>
   dropTarget.value?.kind === "group" && dropTarget.value.groupName === groupName
@@ -60,6 +78,51 @@ watch(sortBy, (v) => {
 })
 
 const servers = ref<Connection[]>([])
+const allImportSelected = computed(() =>
+  importDrafts.value.length > 0 && importDrafts.value.every((draft) => draft.selected),
+)
+const selectedImportCount = computed(() =>
+  importDrafts.value.filter((draft) => draft.selected).length,
+)
+const allExportSelected = computed(() =>
+  exportDrafts.value.length > 0 && exportDrafts.value.every((draft) => draft.selected),
+)
+const selectedExportCount = computed(() =>
+  exportDrafts.value.filter((draft) => draft.selected).length,
+)
+
+const normalizeImportDraft = (draft: Partial<Connection>, index: number): ImportDraft => ({
+  address: draft.address ?? "",
+  heapSize: draft.heapSize ?? "512m",
+  icon: draft.icon ?? "",
+  iconDataUrl: draft.iconDataUrl ?? null,
+  id: draft.id ?? "",
+  javaHome: draft.javaHome ?? "",
+  javaArgs: draft.javaArgs ?? "",
+  name: draft.name ?? `Imported Server ${index + 1}`,
+  username: typeof draft.username === "string" ? draft.username : "",
+  password: typeof draft.password === "string" ? draft.password : "",
+  verify: draft.verify ?? true,
+  group: draft.group ?? "Default",
+  environment: draft.environment ?? "",
+  notes: draft.notes ?? "",
+  donotcache: draft.donotcache ?? false,
+  lastConnected: draft.lastConnected ?? null,
+  groupOrder: draft.groupOrder ?? 0,
+  environmentOrder: draft.environmentOrder ?? 0,
+  sortOrder: draft.sortOrder ?? 0,
+  showConsole: draft.showConsole ?? false,
+  nodeId: draft.nodeId ?? "",
+  parentId: draft.parentId ?? "",
+  importKey: `${draft.id ?? "import"}-${index}`,
+  selected: true,
+})
+
+const normalizeExportDraft = (server: Connection, selected: boolean): ExportDraft => ({
+  ...server,
+  exportKey: server.id,
+  selected,
+})
 
 const sortByManualOrder = (a: Connection, b: Connection) =>
   (a.sortOrder ?? 0) - (b.sortOrder ?? 0) || a.name.localeCompare(b.name)
@@ -272,6 +335,7 @@ const moveGroup = (draggedGroupName: string, targetGroupName: string) => {
   if (draggedIndex < 0 || targetIndex < 0) return
 
   const [moved] = reordered.splice(draggedIndex, 1)
+  if (!moved) return
   reordered.splice(targetIndex, 0, moved)
   applyGroupOrder(reordered)
 }
@@ -288,6 +352,7 @@ const moveEnvironment = (groupName: string, draggedEnvironmentKey: string, targe
   if (draggedIndex < 0 || targetIndex < 0) return
 
   const [moved] = reordered.splice(draggedIndex, 1)
+  if (!moved) return
   reordered.splice(targetIndex, 0, moved)
   applyEnvironmentOrder(groupName, reordered.map((environment) => environment.key))
 }
@@ -308,6 +373,7 @@ const moveServerWithinBucket = (draggedId: string, targetId: string, groupName: 
 
   const reordered = [...bucketServers]
   const [moved] = reordered.splice(draggedIndex, 1)
+  if (!moved) return
   reordered.splice(targetIndex, 0, moved)
   applyServerOrder(groupName, environmentKey, reordered.map((server) => server.id))
 }
@@ -415,9 +481,92 @@ const launchServer = async (connection: Connection) => {
 const openSettings = (server: Connection) =>
   navigateTo(`/connections/${server.id}`)
 
+const closeImportModal = () => {
+  showImportModal.value = false
+  isImporting.value = false
+  importSourceLabel.value = ""
+  importDrafts.value = []
+  bulkImportUsername.value = ""
+  bulkImportPassword.value = ""
+}
+
+const closeExportModal = () => {
+  showExportModal.value = false
+  isExporting.value = false
+  exportDrafts.value = []
+}
+
+const toggleSelectAllImports = () => {
+  const nextValue = !allImportSelected.value
+  importDrafts.value = importDrafts.value.map((draft) => ({
+    ...draft,
+    selected: nextValue,
+  }))
+}
+
+const toggleSelectAllExports = () => {
+  const nextValue = !allExportSelected.value
+  exportDrafts.value = exportDrafts.value.map((draft) => ({
+    ...draft,
+    selected: nextValue,
+  }))
+}
+
+const applyCredentialsToSelectedImports = () => {
+  importDrafts.value = importDrafts.value.map((draft) =>
+    draft.selected
+      ? {
+          ...draft,
+          username: bulkImportUsername.value,
+          password: bulkImportPassword.value,
+        }
+      : draft,
+  )
+}
+
+const exportConnections = () => {
+  const selectedId = selectedServerId.value
+  exportDrafts.value = servers.value
+    .map((server) => normalizeExportDraft(server, selectedId ? server.id === selectedId : true))
+    .sort(sortByManualOrder)
+  showExportModal.value = true
+}
+
+const confirmExportDrafts = async () => {
+  const selectedIds = exportDrafts.value
+    .filter((draft) => draft.selected)
+    .map((draft) => draft.id)
+  if (!selectedIds.length) return
+
+  const filePath = await saveDialog({
+    title: "Export Connections",
+    defaultPath: selectedIds.length === 1 ? "ballista-server-export.json" : "ballista-connections-export.json",
+    filters: [{ name: "JSON", extensions: ["json"] }],
+  })
+  if (!filePath) return
+
+  try {
+    isExporting.value = true
+    launchError.value = null
+    actionMessage.value = null
+    const response: string = await invoke("export_connections", {
+      file_path: filePath,
+      ids: selectedIds,
+    })
+    const result = JSON.parse(response)
+    const count = result.total ?? selectedIds.length
+    closeExportModal()
+    actionMessage.value = `Exported ${count} ${count === 1 ? "connection" : "connections"} with embedded portable icons and without credentials.`
+  } catch (e) {
+    launchError.value = `Export failed: ${e}`
+  } finally {
+    isExporting.value = false
+  }
+}
+
 const importConnections = async () => {
   const proceed = await ask(
-    "Select a JSON file containing connection definitions (e.g., exported from another Ballista instance or from MCAL's data/connections.json).",
+    "Select a JSON file containing connection definitions. Ballista will strip any saved credentials from the import preview, then let you bulk-apply credentials before saving.",
     { title: "Import Connections", kind: "info" },
   )
   if (!proceed) return
@@ -428,20 +577,59 @@ const importConnections = async () => {
   })
   if (!filePath) return
   try {
-    const resp: string = await invoke("import", { file_path: filePath, overwrite: false })
-    const result = JSON.parse(resp)
+    launchError.value = null
+    actionMessage.value = null
+    const response: string = await invoke("preview_import", { file_path: filePath })
+    const parsed = JSON.parse(response) as Partial<Connection>[]
+    importDrafts.value = parsed.map(normalizeImportDraft)
+    importSourceLabel.value = typeof filePath === "string" ? filePath.split("/").pop() || filePath : "connections.json"
+    bulkImportUsername.value = ""
+    bulkImportPassword.value = ""
+    showImportModal.value = true
+  } catch (e) {
+    launchError.value = `Import failed: ${e}`
+  }
+}
+
+const confirmImportDrafts = async () => {
+  if (!importDrafts.value.length) return
+
+  try {
+    isImporting.value = true
+    launchError.value = null
+    actionMessage.value = null
+    const entries = importDrafts.value.map(({ importKey, selected, ...draft }) => draft)
+    let response: string = await invoke("import_entries", {
+      entries: JSON.stringify(entries),
+      overwrite: false,
+    })
+    let result = JSON.parse(response)
+
     if (result.status === "duplicates") {
       const names = result.names.join(", ")
       const confirmed = await ask(
         `${result.names.length} of ${result.total} connections already exist and will be overwritten:\n\n${names}`,
         { title: "Overwrite existing connections?", kind: "warning" },
       )
-      if (!confirmed) return
-      await invoke("import", { file_path: filePath, overwrite: true })
+      if (!confirmed) {
+        isImporting.value = false
+        return
+      }
+      response = await invoke("import_entries", {
+        entries: JSON.stringify(entries),
+        overwrite: true,
+      })
+      result = JSON.parse(response)
     }
-    window.location.reload()
+
+    closeImportModal()
+    await loadConnections()
+    const importedTotal = result.total ?? entries.length
+    actionMessage.value = `Imported ${importedTotal} ${importedTotal === 1 ? "connection" : "connections"}.`
   } catch (e) {
     launchError.value = `Import failed: ${e}`
+  } finally {
+    isImporting.value = false
   }
 }
 
@@ -487,6 +675,13 @@ const deselectAll = () => {
         >
           <icon name="ph:download-simple-bold" class="text-xs" />
           Import
+        </button>
+        <button
+          class="flex items-center gap-1.5 px-3 py-1.5 text-sm rounded-md border border-border bg-surface-1 text-text-secondary hover:text-text-primary hover:bg-surface-2 hover:cursor-pointer transition-colors duration-100"
+          @click="exportConnections"
+        >
+          <icon name="ph:upload-simple-bold" class="text-xs" />
+          Export
         </button>
       </div>
       <div class="flex items-center gap-2">
@@ -771,6 +966,221 @@ const deselectAll = () => {
         <div class="flex items-center justify-between px-4 py-2">
           <p class="text-xs text-danger truncate">{{ launchError }}</p>
           <button @click="launchError = null" class="text-xs text-danger hover:text-text-primary hover:cursor-pointer ml-2 flex-none">Dismiss</button>
+        </div>
+      </div>
+    </Transition>
+
+    <Transition
+      enter-active-class="transition duration-150 ease-out"
+      enter-from-class="translate-y-full opacity-0"
+      enter-to-class="translate-y-0 opacity-100"
+      leave-active-class="transition duration-100 ease-in"
+      leave-from-class="translate-y-0 opacity-100"
+      leave-to-class="translate-y-full opacity-0"
+    >
+      <div v-if="actionMessage" class="absolute bottom-0 inset-x-0 bg-accent/10 border-t border-accent/30">
+        <div class="flex items-center justify-between px-4 py-2">
+          <p class="text-xs text-text-primary truncate">{{ actionMessage }}</p>
+          <button @click="actionMessage = null" class="text-xs text-text-secondary hover:text-text-primary hover:cursor-pointer ml-2 flex-none">Dismiss</button>
+        </div>
+      </div>
+    </Transition>
+
+    <!-- Export modal -->
+    <Transition
+      enter-active-class="transition duration-150 ease-out"
+      enter-from-class="opacity-0"
+      enter-to-class="opacity-100"
+      leave-active-class="transition duration-100 ease-in"
+      leave-from-class="opacity-100"
+      leave-to-class="opacity-0"
+    >
+      <div v-if="showExportModal" class="absolute inset-0 z-[100] flex items-center justify-center bg-black/50 px-5" @click.self="closeExportModal">
+        <div class="bg-surface-1 border border-border rounded-lg shadow-overlay w-full max-w-3xl max-h-[85vh] overflow-hidden">
+          <div class="flex items-center justify-between px-5 py-4 border-b border-border">
+            <div>
+              <h2 class="font-semibold text-text-primary">Export Connections</h2>
+              <p class="text-xs text-text-tertiary mt-1">
+                Choose the servers to include. Credentials are excluded, and custom icons are embedded so the export works on another machine.
+              </p>
+            </div>
+            <button @click="closeExportModal" class="text-text-tertiary hover:text-text-primary hover:cursor-pointer">
+              <icon name="ph:x" class="text-sm" />
+            </button>
+          </div>
+
+          <div class="p-5 border-b border-border flex items-center justify-between gap-3">
+            <p class="text-sm text-text-primary">
+              {{ selectedExportCount }} of {{ exportDrafts.length }} {{ exportDrafts.length === 1 ? "server" : "servers" }} selected
+            </p>
+            <button
+              class="text-xs text-accent hover:text-accent-hover hover:cursor-pointer"
+              @click="toggleSelectAllExports"
+            >
+              {{ allExportSelected ? "Clear selection" : "Select all" }}
+            </button>
+          </div>
+
+          <div class="overflow-y-auto max-h-[calc(85vh-174px)] p-5 space-y-2">
+            <div
+              v-for="draft in exportDrafts"
+              :key="draft.exportKey"
+              class="rounded-md border px-3 py-2 transition-colors duration-100"
+              :class="draft.selected ? 'border-accent/40 bg-accent/5' : 'border-border bg-surface-0'"
+            >
+              <label class="flex items-start gap-3 hover:cursor-pointer">
+                <input v-model="draft.selected" type="checkbox" class="mt-1 accent-accent" />
+                <div class="min-w-0 flex-1">
+                  <div class="flex items-center gap-2">
+                    <p class="text-sm font-medium text-text-primary truncate">{{ draft.name }}</p>
+                    <span class="text-[10px] uppercase tracking-wide text-text-disabled">
+                      {{ draft.group || "Default" }}<template v-if="draft.environment"> / {{ draft.environment }}</template>
+                    </span>
+                  </div>
+                  <p class="text-xs text-text-tertiary truncate mt-0.5">{{ draft.address }}</p>
+                  <p class="text-[11px] mt-1 text-text-disabled">
+                    {{ draft.iconDataUrl ? "Includes custom icon" : "No custom icon to embed" }}
+                  </p>
+                </div>
+              </label>
+            </div>
+          </div>
+
+          <div class="flex items-center justify-between px-5 py-4 border-t border-border">
+            <p class="text-xs text-text-tertiary">
+              Export format is portable between Ballista installs.
+            </p>
+            <div class="flex items-center gap-2">
+              <button
+                class="px-3 py-1.5 text-sm rounded-md text-text-secondary hover:bg-surface-2 hover:cursor-pointer transition-colors duration-100"
+                @click="closeExportModal"
+              >
+                Cancel
+              </button>
+              <button
+                class="px-3 py-1.5 text-sm rounded-md bg-accent text-white hover:bg-accent-hover hover:cursor-pointer transition-colors duration-100 disabled:opacity-50 disabled:hover:cursor-default"
+                :disabled="isExporting || selectedExportCount === 0"
+                @click="confirmExportDrafts"
+              >
+                {{ isExporting ? "Exporting..." : `Export ${selectedExportCount} ${selectedExportCount === 1 ? "Server" : "Servers"}` }}
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </Transition>
+
+    <!-- Import modal -->
+    <Transition
+      enter-active-class="transition duration-150 ease-out"
+      enter-from-class="opacity-0"
+      enter-to-class="opacity-100"
+      leave-active-class="transition duration-100 ease-in"
+      leave-from-class="opacity-100"
+      leave-to-class="opacity-0"
+    >
+      <div v-if="showImportModal" class="absolute inset-0 z-[100] flex items-center justify-center bg-black/50 px-5" @click.self="closeImportModal">
+        <div class="bg-surface-1 border border-border rounded-lg shadow-overlay w-full max-w-3xl max-h-[85vh] overflow-hidden">
+          <div class="flex items-center justify-between px-5 py-4 border-b border-border">
+            <div>
+              <h2 class="font-semibold text-text-primary">Review Import</h2>
+              <p class="text-xs text-text-tertiary mt-1">
+                {{ importSourceLabel }} · credentials are stripped from the file preview until you apply them here.
+              </p>
+            </div>
+            <button @click="closeImportModal" class="text-text-tertiary hover:text-text-primary hover:cursor-pointer">
+              <icon name="ph:x" class="text-sm" />
+            </button>
+          </div>
+
+          <div class="grid md:grid-cols-[280px_minmax(0,1fr)] max-h-[calc(85vh-134px)]">
+            <div class="border-b md:border-b-0 md:border-r border-border p-5 space-y-4">
+              <div class="flex items-center justify-between">
+                <p class="text-sm font-medium text-text-primary">Bulk Credentials</p>
+                <button
+                  class="text-xs text-accent hover:text-accent-hover hover:cursor-pointer"
+                  @click="toggleSelectAllImports"
+                >
+                  {{ allImportSelected ? "Clear selection" : "Select all" }}
+                </button>
+              </div>
+              <p class="text-xs text-text-tertiary">
+                Checked servers will receive the username and password below when you click Apply.
+              </p>
+              <div class="space-y-1">
+                <label class="block text-sm font-medium text-text-secondary">Username</label>
+                <input
+                  v-model="bulkImportUsername"
+                  type="text"
+                  class="w-full bg-surface-0 border border-border rounded-md px-2.5 py-1.5 text-sm text-text-primary outline-none transition-colors duration-100 focus:border-border-focus focus:ring-1 focus:ring-accent/30"
+                  placeholder="admin"
+                />
+              </div>
+              <div class="space-y-1">
+                <label class="block text-sm font-medium text-text-secondary">Password</label>
+                <input
+                  v-model="bulkImportPassword"
+                  type="password"
+                  class="w-full bg-surface-0 border border-border rounded-md px-2.5 py-1.5 text-sm text-text-primary outline-none transition-colors duration-100 focus:border-border-focus focus:ring-1 focus:ring-accent/30"
+                  placeholder="Password"
+                />
+              </div>
+              <button
+                class="w-full flex items-center justify-center gap-1.5 px-3 py-2 text-sm rounded-md bg-accent text-white hover:bg-accent-hover hover:cursor-pointer transition-colors duration-100 disabled:opacity-50 disabled:hover:cursor-default"
+                :disabled="selectedImportCount === 0"
+                @click="applyCredentialsToSelectedImports"
+              >
+                <icon name="ph:key-bold" class="text-xs" />
+                Apply To {{ selectedImportCount }} {{ selectedImportCount === 1 ? "Server" : "Servers" }}
+              </button>
+            </div>
+
+            <div class="overflow-y-auto p-5 space-y-2">
+              <div
+                v-for="draft in importDrafts"
+                :key="draft.importKey"
+                class="rounded-md border px-3 py-2 transition-colors duration-100"
+                :class="draft.selected ? 'border-accent/40 bg-accent/5' : 'border-border bg-surface-0'"
+              >
+                <label class="flex items-start gap-3 hover:cursor-pointer">
+                  <input v-model="draft.selected" type="checkbox" class="mt-1 accent-accent" />
+                  <div class="min-w-0 flex-1">
+                    <div class="flex items-center gap-2">
+                      <p class="text-sm font-medium text-text-primary truncate">{{ draft.name }}</p>
+                      <span class="text-[10px] uppercase tracking-wide text-text-disabled">
+                        {{ draft.group || "Default" }}<template v-if="draft.environment"> / {{ draft.environment }}</template>
+                      </span>
+                    </div>
+                    <p class="text-xs text-text-tertiary truncate mt-0.5">{{ draft.address }}</p>
+                    <p class="text-[11px] mt-1" :class="draft.username || draft.password ? 'text-accent' : 'text-text-disabled'">
+                      {{ draft.username || draft.password ? `Credentials ready for ${draft.username || "selected user"}` : "No credentials assigned yet" }}
+                    </p>
+                  </div>
+                </label>
+              </div>
+            </div>
+          </div>
+
+          <div class="flex items-center justify-between px-5 py-4 border-t border-border">
+            <p class="text-xs text-text-tertiary">
+              {{ importDrafts.length }} {{ importDrafts.length === 1 ? "server" : "servers" }} will be imported.
+            </p>
+            <div class="flex items-center gap-2">
+              <button
+                class="px-3 py-1.5 text-sm rounded-md text-text-secondary hover:bg-surface-2 hover:cursor-pointer transition-colors duration-100"
+                @click="closeImportModal"
+              >
+                Cancel
+              </button>
+              <button
+                class="px-3 py-1.5 text-sm rounded-md bg-accent text-white hover:bg-accent-hover hover:cursor-pointer transition-colors duration-100 disabled:opacity-50 disabled:hover:cursor-default"
+                :disabled="isImporting || importDrafts.length === 0"
+                @click="confirmImportDrafts"
+              >
+                {{ isImporting ? "Importing..." : `Import ${importDrafts.length} ${importDrafts.length === 1 ? "Server" : "Servers"}` }}
+              </button>
+            </div>
+          </div>
         </div>
       </div>
     </Transition>

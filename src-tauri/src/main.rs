@@ -14,7 +14,7 @@ use serde_json::Number;
 use tauri::ipc::Channel;
 use tauri::{AppHandle, Manager, State};
 
-use crate::connection::{ConnectionEntry, ConnectionStore};
+use crate::connection::{ConnectionEntry, ConnectionStore, ImportedConnectionEntry};
 use crate::webstart::{clear_connection_cache, WebStartCache, WebstartFile};
 
 mod connection;
@@ -155,6 +155,23 @@ fn import(file_path: &str, overwrite: bool, cs: State<ConnectionStore>) -> Resul
 }
 
 #[tauri::command(rename_all = "snake_case")]
+fn preview_import(file_path: &str, cs: State<ConnectionStore>) -> Result<String, String> {
+    cs.preview_import(file_path).map_err(|e| e.to_string())
+}
+
+#[tauri::command(rename_all = "snake_case")]
+fn import_entries(entries: &str, overwrite: bool, cs: State<ConnectionStore>) -> Result<String, String> {
+    let entries: Vec<ImportedConnectionEntry> = serde_json::from_str(entries)
+        .map_err(|e| format!("failed to deserialize import entries: {}", e))?;
+    cs.import_entries(entries, overwrite).map_err(|e| e.to_string())
+}
+
+#[tauri::command(rename_all = "snake_case")]
+fn export_connections(file_path: &str, ids: Option<Vec<String>>, cs: State<ConnectionStore>) -> Result<String, String> {
+    cs.export(file_path, ids).map_err(|e| e.to_string())
+}
+
+#[tauri::command(rename_all = "snake_case")]
 fn trust_cert(cert: &str, cs: State<ConnectionStore>) -> Result<String, String> {
     cs.add_trusted_cert(cert).map_err(|e| e.to_string())?;
     Ok(String::from("success"))
@@ -209,6 +226,9 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             launch,
             import,
+            preview_import,
+            import_entries,
+            export_connections,
             delete,
             clear_cache,
             save,

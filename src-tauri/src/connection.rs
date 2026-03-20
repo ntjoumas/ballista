@@ -57,6 +57,14 @@ pub struct ConnectionEntry {
     pub show_console: bool,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+pub struct ImportedConnectionEntry {
+    #[serde(flatten)]
+    connection: ConnectionEntry,
+    #[serde(default, rename = "iconDataUrl", alias = "exportedIconDataUrl")]
+    icon_data_url: Option<String>,
+}
+
 pub struct ConnectionStore {
     con_cache: Mutex<HashMap<String, Arc<ConnectionEntry>>>,
     con_location: PathBuf,
@@ -181,6 +189,42 @@ impl ConnectionStore {
         cs.get(id).map(|ce| self.connection_entry_json(ce.as_ref()))
     }
 
+    pub fn export(&self, file_path: &str, ids: Option<Vec<String>>) -> Result<String, Error> {
+        let cache = self.con_cache.lock().expect("connection cache lock poisoned");
+        let mut entries: Vec<Value> = match ids {
+            Some(ids) => ids
+                .into_iter()
+                .filter_map(|id| cache.get(&id).map(|ce| self.exportable_connection_entry(ce.as_ref())))
+                .collect(),
+            None => cache
+                .values()
+                .map(|ce| self.exportable_connection_entry(ce.as_ref()))
+                .collect(),
+        };
+        drop(cache);
+
+        entries.sort_by(|a, b| {
+            export_order_key(a).cmp(&export_order_key(b))
+        });
+
+        let payload = serde_json::to_string_pretty(&entries)?;
+        fs::write(file_path, payload)?;
+
+        Ok(serde_json::json!({
+            "status": "ok",
+            "total": entries.len(),
+        })
+        .to_string())
+    }
+
+    pub fn preview_import(&self, file_path: &str) -> Result<String, Error> {
+        let entries = Self::read_import_entries(file_path)?
+            .into_iter()
+            .map(|entry| self.import_preview_entry(&entry))
+            .collect::<Vec<_>>();
+        Ok(serde_json::to_string(&entries)?)
+    }
+
     pub fn save(&self, mut ce: ConnectionEntry) -> Result<String, Error> {
         let is_new = ce.id.is_empty();
         if is_new {
@@ -275,15 +319,33 @@ impl ConnectionStore {
     }
 
     pub fn import(&self, file_path: &str, overwrite: bool) -> Result<String, Error> {
-        let f = File::open(file_path)?;
-        let data: Vec<ConnectionEntry> = serde_json::from_reader(f)?;
+        let data = Self::read_import_entries(file_path)?;
+        self.import_entries(data, overwrite)
+    }
+
+    pub fn import_entries(
+        &self,
+        data: Vec<ImportedConnectionEntry>,
+        overwrite: bool,
+    ) -> Result<String, Error> {
+        let data = data
+            .into_iter()
+            .map(|mut entry| {
+                let mut ce = entry.connection;
+                if ce.id.trim().is_empty() {
+                    ce.id = Uuid::new_v4().to_string();
+                }
+                entry.connection = ce;
+                entry
+            })
+            .collect::<Vec<_>>();
 
         // Check for collisions with existing connections
         let cache = self.con_cache.lock().expect("connection cache lock poisoned");
         let duplicates: Vec<String> = data
             .iter()
-            .filter(|ce| cache.contains_key(&ce.id))
-            .map(|ce| ce.name.clone())
+            .filter(|entry| cache.contains_key(&entry.connection.id))
+            .map(|entry| entry.connection.name.clone())
             .collect();
         drop(cache);
 
@@ -298,9 +360,26 @@ impl ConnectionStore {
 
         let mut count = 0;
         let java_home = find_java_home();
-        for mut ce in data {
+        for mut entry in data {
+            let mut ce = entry.connection;
             ce.java_home = java_home.clone();
-            self.prepare_managed_icon(&mut ce)?;
+            ce.username = ce
+                .username
+                .map(|username| username.trim().to_string())
+                .filter(|username| !username.is_empty());
+            ce.password = ce
+                .password
+                .map(|password| password.trim().to_string())
+                .filter(|password| !password.is_empty());
+
+            if let Some(data_url) = entry.icon_data_url.take() {
+                ce.icon = self.write_managed_icon_data_url(&ce.id, &data_url)?;
+            } else if Path::new(ce.icon.trim()).is_file() {
+                self.prepare_managed_icon(&mut ce)?;
+            } else {
+                self.remove_managed_icon(&ce.id)?;
+                ce.icon = String::new();
+            }
             self.con_cache
                 .lock()
                 .expect("connection cache lock poisoned")
@@ -476,6 +555,96 @@ impl ConnectionStore {
         }
         value
     }
+
+    fn exportable_connection_entry(&self, ce: &ConnectionEntry) -> Value {
+        let mut exported = ce.clone();
+        exported.username = None;
+        exported.password = None;
+        exported.last_connected = None;
+
+        let mut value = serde_json::to_value(exported).unwrap_or(Value::Null);
+        if let Value::Object(ref mut map) = value {
+            map.insert(String::from("icon"), Value::String(String::new()));
+            map.insert(
+                String::from("iconDataUrl"),
+                match icon_data_url(&ce.icon) {
+                    Some(data_url) => Value::String(data_url),
+                    None => Value::Null,
+                },
+            );
+        }
+        value
+    }
+
+    fn import_preview_entry(&self, entry: &ImportedConnectionEntry) -> Value {
+        let mut preview = entry.connection.clone();
+        preview.username = None;
+        preview.password = None;
+        preview.last_connected = None;
+        if preview.id.trim().is_empty() {
+            preview.id = Uuid::new_v4().to_string();
+        }
+
+        let mut value = serde_json::to_value(preview).unwrap_or(Value::Null);
+        if let Value::Object(ref mut map) = value {
+            map.insert(
+                String::from("iconDataUrl"),
+                match entry.icon_data_url.as_deref() {
+                    Some(data_url) => Value::String(data_url.to_string()),
+                    None => match icon_data_url(&entry.connection.icon) {
+                        Some(data_url) => Value::String(data_url),
+                        None => Value::Null,
+                    },
+                },
+            );
+        }
+        value
+    }
+
+    fn read_import_entries(file_path: &str) -> Result<Vec<ImportedConnectionEntry>, Error> {
+        let f = File::open(file_path)?;
+        let data: Vec<ImportedConnectionEntry> = serde_json::from_reader(f)?;
+        Ok(data)
+    }
+
+    fn write_managed_icon_data_url(&self, id: &str, data_url: &str) -> Result<String, Error> {
+        let Some((mime_type, encoded)) = data_url
+            .strip_prefix("data:")
+            .and_then(|value| value.split_once(";base64,"))
+        else {
+            self.remove_managed_icon(id)?;
+            return Ok(String::new());
+        };
+
+        let extension = extension_for_mime_type(mime_type);
+        let destination = self.icons_dir.join(format!("{}.{}", id, extension));
+        self.remove_managed_icon(id)?;
+        let bytes = openssl::base64::decode_block(encoded)?;
+        fs::write(&destination, bytes)?;
+        Ok(destination.to_string_lossy().to_string())
+    }
+}
+
+fn export_order_key(value: &Value) -> (i64, i64, i64, String) {
+    let group_order = value
+        .get("groupOrder")
+        .and_then(|value| value.as_i64())
+        .unwrap_or_default();
+    let environment_order = value
+        .get("environmentOrder")
+        .and_then(|value| value.as_i64())
+        .unwrap_or_default();
+    let sort_order = value
+        .get("sortOrder")
+        .and_then(|value| value.as_i64())
+        .unwrap_or_default();
+    let name = value
+        .get("name")
+        .and_then(|value| value.as_str())
+        .unwrap_or_default()
+        .to_string();
+
+    (group_order, environment_order, sort_order, name)
 }
 
 fn icon_data_url(icon_path: &str) -> Option<String> {
@@ -499,6 +668,16 @@ fn icon_data_url(icon_path: &str) -> Option<String> {
 
     let encoded = openssl::base64::encode_block(&bytes);
     Some(format!("data:{};base64,{}", mime_type, encoded))
+}
+
+fn extension_for_mime_type(mime_type: &str) -> &'static str {
+    match mime_type {
+        "image/png" => "png",
+        "image/jpeg" => "jpg",
+        "image/gif" => "gif",
+        "image/icns" => "icns",
+        _ => "png",
+    }
 }
 
 pub fn find_java_home() -> String {
