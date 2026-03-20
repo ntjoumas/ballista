@@ -21,7 +21,7 @@ use rustc_hash::FxHashMap;
 use sha2::{Digest, Sha256};
 use tauri::ipc::Channel;
 
-use crate::connection::ConnectionEntry;
+use crate::connection::{find_java_home, ConnectionEntry};
 use crate::errors::VerificationError;
 use crate::verify::verify_jar;
 
@@ -189,11 +189,16 @@ impl WebstartFile {
         classpath.push_str(&classpath_suffix);
 
         let mut cmd;
-        let java_home = ce.java_home.trim();
-        if java_home.is_empty() {
+        let configured_java_home = ce.java_home.trim();
+        let resolved_java_home = if configured_java_home.is_empty() {
+            find_java_home().trim().to_string()
+        } else {
+            configured_java_home.to_string()
+        };
+        if resolved_java_home.is_empty() {
             cmd = Command::new("java")
         } else {
-            cmd = Command::new(format!("{}/bin/java", java_home));
+            cmd = Command::new(format!("{}/bin/java", resolved_java_home));
         }
 
         println!("using java from: {:?}", cmd.get_program().to_str());
@@ -245,10 +250,10 @@ impl WebstartFile {
                 .ok_or(Error::msg("Java console jar path not provided"))?;
 
             // Launch the Java Console as a separate Java Swing process
-            let java_bin = if java_home.is_empty() {
+            let java_bin = if resolved_java_home.is_empty() {
                 "java".to_string()
             } else {
-                format!("{}/bin/java", java_home)
+                format!("{}/bin/java", resolved_java_home)
             };
 
             let mut console_cmd = Command::new(&java_bin);

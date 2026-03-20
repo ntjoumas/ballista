@@ -72,6 +72,10 @@ const clearIcon = () => {
   server.value.icon = ""
 }
 
+const useSystemDefaultJava = () => {
+  server.value.javaHome = ""
+}
+
 const handleSave = async () => {
   try {
     infoMessage.value = null
@@ -179,7 +183,27 @@ const handleClearCache = async () => {
         <!-- Right column: Java -->
         <section class="space-y-3">
           <h2 class="text-xs font-medium text-text-tertiary uppercase tracking-wider">Configuration</h2>
-          <connection-input type="text" label="Java Home" placeholder="/usr/lib/jvm/java-11" v-model="server.javaHome" />
+          <div class="space-y-1">
+            <label class="block text-sm font-medium text-text-secondary select-none">Java Home</label>
+            <div class="flex items-center gap-2">
+              <input
+                v-model="server.javaHome"
+                type="text"
+                placeholder="System default (auto-detected)"
+                class="w-full bg-surface-1 border border-border rounded-md px-2.5 py-1.5 text-sm text-text-primary placeholder:text-text-disabled outline-none transition-colors duration-100 focus:border-border-focus focus:ring-1 focus:ring-accent/30"
+              />
+              <button
+                type="button"
+                @click="useSystemDefaultJava"
+                class="px-3 py-1.5 text-sm rounded-md text-text-secondary hover:bg-surface-2 hover:text-text-primary hover:cursor-pointer transition-colors duration-100 whitespace-nowrap"
+              >
+                System Default
+              </button>
+            </div>
+            <p class="text-xs text-text-tertiary">
+              Leave blank to auto-detect the local JVM when this server launches.
+            </p>
+          </div>
           <div class="space-y-1">
             <label class="block text-sm font-medium text-text-secondary select-none">JVM Arguments</label>
             <textarea

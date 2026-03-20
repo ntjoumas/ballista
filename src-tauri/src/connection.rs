@@ -231,11 +231,7 @@ impl ConnectionStore {
             ce.id = uuid::Uuid::new_v4().to_string();
         }
 
-        let mut jh = ce.java_home.trim().to_string();
-        if jh.is_empty() {
-            jh = find_java_home();
-        }
-        ce.java_home = jh;
+        ce.java_home = ce.java_home.trim().to_string();
 
         if let Some(ref username) = ce.username {
             let username = username.trim();
@@ -359,10 +355,9 @@ impl ConnectionStore {
         }
 
         let mut count = 0;
-        let java_home = find_java_home();
         for mut entry in data {
             let mut ce = entry.connection;
-            ce.java_home = java_home.clone();
+            ce.java_home = ce.java_home.trim().to_string();
             ce.username = ce
                 .username
                 .map(|username| username.trim().to_string())
@@ -561,6 +556,7 @@ impl ConnectionStore {
         exported.username = None;
         exported.password = None;
         exported.last_connected = None;
+        exported.java_home = String::new();
 
         let mut value = serde_json::to_value(exported).unwrap_or(Value::Null);
         if let Value::Object(ref mut map) = value {

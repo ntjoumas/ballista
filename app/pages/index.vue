@@ -26,6 +26,10 @@ type ExportDraft = Connection & {
   exportKey: string
   selected: boolean
 }
+type BulkJavaDraft = Connection & {
+  bulkKey: string
+  selected: boolean
+}
 type DragState =
   | { kind: "group", groupName: string }
   | { kind: "environment", groupName: string, environmentKey: string }
@@ -54,9 +58,14 @@ const importSourceLabel = ref("")
 const importDrafts = ref<ImportDraft[]>([])
 const bulkImportUsername = ref("")
 const bulkImportPassword = ref("")
+const bulkImportJavaHome = ref("")
 const showExportModal = ref(false)
 const isExporting = ref(false)
 const exportDrafts = ref<ExportDraft[]>([])
+const showBulkJavaModal = ref(false)
+const isApplyingBulkJava = ref(false)
+const bulkJavaDrafts = ref<BulkJavaDraft[]>([])
+const bulkJavaHomeValue = ref("")
 
 const isGroupTarget = (groupName: string) =>
   dropTarget.value?.kind === "group" && dropTarget.value.groupName === groupName
@@ -90,6 +99,12 @@ const allExportSelected = computed(() =>
 const selectedExportCount = computed(() =>
   exportDrafts.value.filter((draft) => draft.selected).length,
 )
+const allBulkJavaSelected = computed(() =>
+  bulkJavaDrafts.value.length > 0 && bulkJavaDrafts.value.every((draft) => draft.selected),
+)
+const selectedBulkJavaCount = computed(() =>
+  bulkJavaDrafts.value.filter((draft) => draft.selected).length,
+)
 
 const normalizeImportDraft = (draft: Partial<Connection>, index: number): ImportDraft => ({
   address: draft.address ?? "",
@@ -121,6 +136,12 @@ const normalizeImportDraft = (draft: Partial<Connection>, index: number): Import
 const normalizeExportDraft = (server: Connection, selected: boolean): ExportDraft => ({
   ...server,
   exportKey: server.id,
+  selected,
+})
+
+const normalizeBulkJavaDraft = (server: Connection, selected: boolean): BulkJavaDraft => ({
+  ...server,
+  bulkKey: server.id,
   selected,
 })
 
@@ -488,12 +509,20 @@ const closeImportModal = () => {
   importDrafts.value = []
   bulkImportUsername.value = ""
   bulkImportPassword.value = ""
+  bulkImportJavaHome.value = ""
 }
 
 const closeExportModal = () => {
   showExportModal.value = false
   isExporting.value = false
   exportDrafts.value = []
+}
+
+const closeBulkJavaModal = () => {
+  showBulkJavaModal.value = false
+  isApplyingBulkJava.value = false
+  bulkJavaDrafts.value = []
+  bulkJavaHomeValue.value = ""
 }
 
 const toggleSelectAllImports = () => {
@@ -512,6 +541,14 @@ const toggleSelectAllExports = () => {
   }))
 }
 
+const toggleSelectAllBulkJava = () => {
+  const nextValue = !allBulkJavaSelected.value
+  bulkJavaDrafts.value = bulkJavaDrafts.value.map((draft) => ({
+    ...draft,
+    selected: nextValue,
+  }))
+}
+
 const applyCredentialsToSelectedImports = () => {
   importDrafts.value = importDrafts.value.map((draft) =>
     draft.selected
@@ -524,12 +561,43 @@ const applyCredentialsToSelectedImports = () => {
   )
 }
 
+const applyJavaHomeToSelectedImports = (javaHome: string) => {
+  importDrafts.value = importDrafts.value.map((draft) =>
+    draft.selected
+      ? {
+          ...draft,
+          javaHome,
+        }
+      : draft,
+  )
+}
+
 const exportConnections = () => {
   const selectedId = selectedServerId.value
   exportDrafts.value = servers.value
     .map((server) => normalizeExportDraft(server, selectedId ? server.id === selectedId : true))
     .sort(sortByManualOrder)
   showExportModal.value = true
+}
+
+const openBulkJavaModal = () => {
+  const selectedId = selectedServerId.value
+  bulkJavaDrafts.value = servers.value
+    .map((server) => normalizeBulkJavaDraft(server, selectedId ? server.id === selectedId : true))
+    .sort(sortByManualOrder)
+  bulkJavaHomeValue.value = ""
+  showBulkJavaModal.value = true
+}
+
+const applyBulkJavaHome = (javaHome: string) => {
+  bulkJavaDrafts.value = bulkJavaDrafts.value.map((draft) =>
+    draft.selected
+      ? {
+          ...draft,
+          javaHome,
+        }
+      : draft,
+  )
 }
 
 const confirmExportDrafts = async () => {
@@ -564,6 +632,36 @@ const confirmExportDrafts = async () => {
   }
 }
 
+const confirmBulkJavaUpdate = async () => {
+  const selectedDrafts = bulkJavaDrafts.value.filter((draft) => draft.selected)
+  if (!selectedDrafts.length) return
+
+  try {
+    isApplyingBulkJava.value = true
+    launchError.value = null
+    actionMessage.value = null
+
+    for (const draft of selectedDrafts) {
+      await invoke("save", {
+        ce: JSON.stringify({
+          ...draft,
+        }),
+      })
+    }
+
+    closeBulkJavaModal()
+    await loadConnections()
+    const javaLabel = selectedDrafts[0]?.javaHome
+      ? "the selected Java Home"
+      : "System Default Java"
+    actionMessage.value = `Updated ${selectedDrafts.length} ${selectedDrafts.length === 1 ? "server" : "servers"} to use ${javaLabel}.`
+  } catch (e) {
+    launchError.value = `Bulk Java Home update failed: ${e}`
+  } finally {
+    isApplyingBulkJava.value = false
+  }
+}
+
 const importConnections = async () => {
   const proceed = await ask(
     "Select a JSON file containing connection definitions. Ballista will strip any saved credentials from the import preview, then let you bulk-apply credentials before saving.",
@@ -585,6 +683,7 @@ const importConnections = async () => {
     importSourceLabel.value = typeof filePath === "string" ? filePath.split("/").pop() || filePath : "connections.json"
     bulkImportUsername.value = ""
     bulkImportPassword.value = ""
+    bulkImportJavaHome.value = ""
     showImportModal.value = true
   } catch (e) {
     launchError.value = `Import failed: ${e}`
@@ -682,6 +781,13 @@ const deselectAll = () => {
         >
           <icon name="ph:upload-simple-bold" class="text-xs" />
           Export
+        </button>
+        <button
+          class="flex items-center gap-1.5 px-3 py-1.5 text-sm rounded-md border border-border bg-surface-1 text-text-secondary hover:text-text-primary hover:bg-surface-2 hover:cursor-pointer transition-colors duration-100"
+          @click="openBulkJavaModal"
+        >
+          <icon name="ph:coffee-bold" class="text-xs" />
+          Bulk Java
         </button>
       </div>
       <div class="flex items-center gap-2">
@@ -986,6 +1092,122 @@ const deselectAll = () => {
       </div>
     </Transition>
 
+    <!-- Bulk Java modal -->
+    <Transition
+      enter-active-class="transition duration-150 ease-out"
+      enter-from-class="opacity-0"
+      enter-to-class="opacity-100"
+      leave-active-class="transition duration-100 ease-in"
+      leave-from-class="opacity-100"
+      leave-to-class="opacity-0"
+    >
+      <div v-if="showBulkJavaModal" class="absolute inset-0 z-[100] flex items-center justify-center bg-black/50 px-5" @click.self="closeBulkJavaModal">
+        <div class="bg-surface-1 border border-border rounded-lg shadow-overlay w-full max-w-3xl max-h-[85vh] overflow-hidden">
+          <div class="flex items-center justify-between px-5 py-4 border-b border-border">
+            <div>
+              <h2 class="font-semibold text-text-primary">Bulk Update Java Home</h2>
+              <p class="text-xs text-text-tertiary mt-1">
+                Choose current servers, then apply either a specific Java Home or System Default.
+              </p>
+            </div>
+            <button @click="closeBulkJavaModal" class="text-text-tertiary hover:text-text-primary hover:cursor-pointer">
+              <icon name="ph:x" class="text-sm" />
+            </button>
+          </div>
+
+          <div class="grid md:grid-cols-[280px_minmax(0,1fr)] max-h-[calc(85vh-134px)]">
+            <div class="border-b md:border-b-0 md:border-r border-border p-5 space-y-4">
+              <div class="flex items-center justify-between">
+                <p class="text-sm font-medium text-text-primary">Java Home</p>
+                <button
+                  class="text-xs text-accent hover:text-accent-hover hover:cursor-pointer"
+                  @click="toggleSelectAllBulkJava"
+                >
+                  {{ allBulkJavaSelected ? "Clear selection" : "Select all" }}
+                </button>
+              </div>
+              <div class="space-y-1">
+                <label class="block text-sm font-medium text-text-secondary">Java Home</label>
+                <input
+                  v-model="bulkJavaHomeValue"
+                  type="text"
+                  class="w-full bg-surface-0 border border-border rounded-md px-2.5 py-1.5 text-sm text-text-primary outline-none transition-colors duration-100 focus:border-border-focus focus:ring-1 focus:ring-accent/30"
+                  placeholder="System default (auto-detected)"
+                />
+              </div>
+              <div class="grid grid-cols-2 gap-2">
+                <button
+                  class="w-full flex items-center justify-center gap-1.5 px-3 py-2 text-sm rounded-md bg-accent text-white hover:bg-accent-hover hover:cursor-pointer transition-colors duration-100 disabled:opacity-50 disabled:hover:cursor-default"
+                  :disabled="selectedBulkJavaCount === 0"
+                  @click="applyBulkJavaHome(bulkJavaHomeValue)"
+                >
+                  <icon name="ph:coffee-bold" class="text-xs" />
+                  Apply Path
+                </button>
+                <button
+                  class="w-full flex items-center justify-center gap-1.5 px-3 py-2 text-sm rounded-md border border-border bg-surface-0 text-text-secondary hover:text-text-primary hover:bg-surface-2 hover:cursor-pointer transition-colors duration-100 disabled:opacity-50 disabled:hover:cursor-default"
+                  :disabled="selectedBulkJavaCount === 0"
+                  @click="applyBulkJavaHome('')"
+                >
+                  <icon name="ph:desktop-bold" class="text-xs" />
+                  System Default
+                </button>
+              </div>
+              <p class="text-xs text-text-tertiary">
+                Blank Java Home means Ballista will auto-detect the local JVM at launch time.
+              </p>
+            </div>
+
+            <div class="overflow-y-auto p-5 space-y-2">
+              <div
+                v-for="draft in bulkJavaDrafts"
+                :key="draft.bulkKey"
+                class="rounded-md border px-3 py-2 transition-colors duration-100"
+                :class="draft.selected ? 'border-accent/40 bg-accent/5' : 'border-border bg-surface-0'"
+              >
+                <label class="flex items-start gap-3 hover:cursor-pointer">
+                  <input v-model="draft.selected" type="checkbox" class="mt-1 accent-accent" />
+                  <div class="min-w-0 flex-1">
+                    <div class="flex items-center gap-2">
+                      <p class="text-sm font-medium text-text-primary truncate">{{ draft.name }}</p>
+                      <span class="text-[10px] uppercase tracking-wide text-text-disabled">
+                        {{ draft.group || "Default" }}<template v-if="draft.environment"> / {{ draft.environment }}</template>
+                      </span>
+                    </div>
+                    <p class="text-xs text-text-tertiary truncate mt-0.5">{{ draft.address }}</p>
+                    <p class="text-[11px] mt-1" :class="draft.javaHome ? 'text-accent' : 'text-text-disabled'">
+                      {{ draft.javaHome ? `Java Home: ${draft.javaHome}` : "Java Home: System default (auto-detected)" }}
+                    </p>
+                  </div>
+                </label>
+              </div>
+            </div>
+          </div>
+
+          <div class="flex items-center justify-between px-5 py-4 border-t border-border">
+            <p class="text-xs text-text-tertiary">
+              {{ selectedBulkJavaCount }} {{ selectedBulkJavaCount === 1 ? "server" : "servers" }} selected
+            </p>
+            <div class="flex items-center gap-2">
+              <button
+                class="px-3 py-1.5 text-sm rounded-md text-text-secondary hover:bg-surface-2 hover:cursor-pointer transition-colors duration-100"
+                @click="closeBulkJavaModal"
+              >
+                Cancel
+              </button>
+              <button
+                class="px-3 py-1.5 text-sm rounded-md bg-accent text-white hover:bg-accent-hover hover:cursor-pointer transition-colors duration-100 disabled:opacity-50 disabled:hover:cursor-default"
+                :disabled="isApplyingBulkJava || selectedBulkJavaCount === 0"
+                @click="confirmBulkJavaUpdate"
+              >
+                {{ isApplyingBulkJava ? "Saving..." : `Update ${selectedBulkJavaCount} ${selectedBulkJavaCount === 1 ? "Server" : "Servers"}` }}
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </Transition>
+
     <!-- Export modal -->
     <Transition
       enter-active-class="transition duration-150 ease-out"
@@ -1125,6 +1347,15 @@ const deselectAll = () => {
                   placeholder="Password"
                 />
               </div>
+              <div class="space-y-1">
+                <label class="block text-sm font-medium text-text-secondary">Java Home</label>
+                <input
+                  v-model="bulkImportJavaHome"
+                  type="text"
+                  class="w-full bg-surface-0 border border-border rounded-md px-2.5 py-1.5 text-sm text-text-primary outline-none transition-colors duration-100 focus:border-border-focus focus:ring-1 focus:ring-accent/30"
+                  placeholder="System default (auto-detected)"
+                />
+              </div>
               <button
                 class="w-full flex items-center justify-center gap-1.5 px-3 py-2 text-sm rounded-md bg-accent text-white hover:bg-accent-hover hover:cursor-pointer transition-colors duration-100 disabled:opacity-50 disabled:hover:cursor-default"
                 :disabled="selectedImportCount === 0"
@@ -1133,6 +1364,27 @@ const deselectAll = () => {
                 <icon name="ph:key-bold" class="text-xs" />
                 Apply To {{ selectedImportCount }} {{ selectedImportCount === 1 ? "Server" : "Servers" }}
               </button>
+              <div class="grid grid-cols-2 gap-2">
+                <button
+                  class="w-full flex items-center justify-center gap-1.5 px-3 py-2 text-sm rounded-md border border-border bg-surface-0 text-text-secondary hover:text-text-primary hover:bg-surface-2 hover:cursor-pointer transition-colors duration-100 disabled:opacity-50 disabled:hover:cursor-default"
+                  :disabled="selectedImportCount === 0"
+                  @click="applyJavaHomeToSelectedImports(bulkImportJavaHome)"
+                >
+                  <icon name="ph:coffee-bold" class="text-xs" />
+                  Apply Java Home
+                </button>
+                <button
+                  class="w-full flex items-center justify-center gap-1.5 px-3 py-2 text-sm rounded-md border border-border bg-surface-0 text-text-secondary hover:text-text-primary hover:bg-surface-2 hover:cursor-pointer transition-colors duration-100 disabled:opacity-50 disabled:hover:cursor-default"
+                  :disabled="selectedImportCount === 0"
+                  @click="applyJavaHomeToSelectedImports('')"
+                >
+                  <icon name="ph:desktop-bold" class="text-xs" />
+                  System Default
+                </button>
+              </div>
+              <p class="text-xs text-text-tertiary">
+                Blank Java Home means Ballista will auto-detect the JVM on this Mac at launch time.
+              </p>
             </div>
 
             <div class="overflow-y-auto p-5 space-y-2">
@@ -1154,6 +1406,9 @@ const deselectAll = () => {
                     <p class="text-xs text-text-tertiary truncate mt-0.5">{{ draft.address }}</p>
                     <p class="text-[11px] mt-1" :class="draft.username || draft.password ? 'text-accent' : 'text-text-disabled'">
                       {{ draft.username || draft.password ? `Credentials ready for ${draft.username || "selected user"}` : "No credentials assigned yet" }}
+                    </p>
+                    <p class="text-[11px] mt-0.5" :class="draft.javaHome ? 'text-accent' : 'text-text-disabled'">
+                      {{ draft.javaHome ? `Java Home: ${draft.javaHome}` : "Java Home: System default (auto-detected)" }}
                     </p>
                   </div>
                 </label>
