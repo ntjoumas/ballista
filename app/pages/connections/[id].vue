@@ -4,31 +4,55 @@ import { invoke } from "@tauri-apps/api/core"
 import { ask, open } from "@tauri-apps/plugin-dialog"
 
 const route = useRoute()
-const connectionId = route.params.id
-
-const isNewConnection = connectionId === "new-connection"
+const connectionId = computed(() => String(route.params.id))
+const isNewConnection = computed(() => connectionId.value === "new-connection")
 
 const groups: string[] = await invoke<string[]>("get_all_groups")
 
 const isConnectionEdited = ref<boolean>(false)
+let isSyncingServer = false
 
-const serverObject: Connection =
-  isNewConnection
+const loadConnection = async (id: string): Promise<Connection> => {
+  return id === "new-connection"
     ? await invoke<Connection>("get_default_connectionentry")
     : await invoke<Connection>("load_single_connection", {
-        connectionId: connectionId,
+        connectionId: id,
       })
+}
 
-const server = ref<Connection>(serverObject)
-
-watch(
-  server,
-  () => (isConnectionEdited.value = true),
-  { deep: true },
-)
+const server = ref<Connection>(await loadConnection(connectionId.value))
 
 const errorMessage = ref<string | null>(null)
 const infoMessage = ref<string | null>(null)
+
+const replaceServer = async (nextServer: Connection) => {
+  isSyncingServer = true
+  server.value = nextServer
+  errorMessage.value = null
+  infoMessage.value = null
+  isConnectionEdited.value = false
+  await nextTick()
+  isSyncingServer = false
+}
+
+watch(
+  server,
+  () => {
+    if (!isSyncingServer) {
+      isConnectionEdited.value = true
+    }
+  },
+  { deep: true },
+)
+
+watch(
+  connectionId,
+  async (newId, oldId) => {
+    if (newId === oldId) return
+    const nextServer = await loadConnection(newId)
+    await replaceServer(nextServer)
+  },
+)
 
 const selectIcon = async () => {
   const selected = await open({
@@ -106,7 +130,8 @@ const handleCopy = async () => {
 
     const response = await invoke<string>("save", { ce: JSON.stringify(copy) })
     const savedCopy: Connection = JSON.parse(response)
-    navigateTo(`/connections/${savedCopy.id}`)
+    await replaceServer(savedCopy)
+    await navigateTo(`/connections/${savedCopy.id}`)
   } catch (e) {
     errorMessage.value = `Copy failed: ${e}`
   }
