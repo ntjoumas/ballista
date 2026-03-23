@@ -66,6 +66,8 @@ const showBulkJavaModal = ref(false)
 const isApplyingBulkJava = ref(false)
 const bulkJavaDrafts = ref<BulkJavaDraft[]>([])
 const bulkJavaHomeValue = ref("")
+const bulkExistingUsername = ref("")
+const bulkExistingPassword = ref("")
 
 const isGroupTarget = (groupName: string) =>
   dropTarget.value?.kind === "group" && dropTarget.value.groupName === groupName
@@ -523,6 +525,8 @@ const closeBulkJavaModal = () => {
   isApplyingBulkJava.value = false
   bulkJavaDrafts.value = []
   bulkJavaHomeValue.value = ""
+  bulkExistingUsername.value = ""
+  bulkExistingPassword.value = ""
 }
 
 const toggleSelectAllImports = () => {
@@ -586,6 +590,8 @@ const openBulkJavaModal = () => {
     .map((server) => normalizeBulkJavaDraft(server, selectedId ? server.id === selectedId : true))
     .sort(sortByManualOrder)
   bulkJavaHomeValue.value = ""
+  bulkExistingUsername.value = ""
+  bulkExistingPassword.value = ""
   showBulkJavaModal.value = true
 }
 
@@ -595,6 +601,18 @@ const applyBulkJavaHome = (javaHome: string) => {
       ? {
           ...draft,
           javaHome,
+        }
+      : draft,
+  )
+}
+
+const applyCredentialsToSelectedBulk = () => {
+  bulkJavaDrafts.value = bulkJavaDrafts.value.map((draft) =>
+    draft.selected
+      ? {
+          ...draft,
+          username: bulkExistingUsername.value,
+          password: bulkExistingPassword.value,
         }
       : draft,
   )
@@ -651,12 +669,9 @@ const confirmBulkJavaUpdate = async () => {
 
     closeBulkJavaModal()
     await loadConnections()
-    const javaLabel = selectedDrafts[0]?.javaHome
-      ? "the selected Java Home"
-      : "System Default Java"
-    actionMessage.value = `Updated ${selectedDrafts.length} ${selectedDrafts.length === 1 ? "server" : "servers"} to use ${javaLabel}.`
+    actionMessage.value = `Updated ${selectedDrafts.length} ${selectedDrafts.length === 1 ? "server" : "servers"} with the selected bulk changes.`
   } catch (e) {
-    launchError.value = `Bulk Java Home update failed: ${e}`
+    launchError.value = `Bulk update failed: ${e}`
   } finally {
     isApplyingBulkJava.value = false
   }
@@ -787,7 +802,7 @@ const deselectAll = () => {
           @click="openBulkJavaModal"
         >
           <icon name="ph:coffee-bold" class="text-xs" />
-          Bulk Java
+          Bulk Update
         </button>
       </div>
       <div class="flex items-center gap-2">
@@ -1092,7 +1107,7 @@ const deselectAll = () => {
       </div>
     </Transition>
 
-    <!-- Bulk Java modal -->
+    <!-- Bulk update modal -->
     <Transition
       enter-active-class="transition duration-150 ease-out"
       enter-from-class="opacity-0"
@@ -1105,9 +1120,9 @@ const deselectAll = () => {
         <div class="bg-surface-1 border border-border rounded-lg shadow-overlay w-full max-w-3xl max-h-[85vh] overflow-hidden">
           <div class="flex items-center justify-between px-5 py-4 border-b border-border">
             <div>
-              <h2 class="font-semibold text-text-primary">Bulk Update Java Home</h2>
+              <h2 class="font-semibold text-text-primary">Bulk Update Servers</h2>
               <p class="text-xs text-text-tertiary mt-1">
-                Choose current servers, then apply either a specific Java Home or System Default.
+                Choose current servers, then apply credentials, Java Home, or System Default in one pass.
               </p>
             </div>
             <button @click="closeBulkJavaModal" class="text-text-tertiary hover:text-text-primary hover:cursor-pointer">
@@ -1118,7 +1133,7 @@ const deselectAll = () => {
           <div class="grid md:grid-cols-[280px_minmax(0,1fr)] max-h-[calc(85vh-134px)]">
             <div class="border-b md:border-b-0 md:border-r border-border p-5 space-y-4">
               <div class="flex items-center justify-between">
-                <p class="text-sm font-medium text-text-primary">Java Home</p>
+                <p class="text-sm font-medium text-text-primary">Bulk Changes</p>
                 <button
                   class="text-xs text-accent hover:text-accent-hover hover:cursor-pointer"
                   @click="toggleSelectAllBulkJava"
@@ -1126,6 +1141,32 @@ const deselectAll = () => {
                   {{ allBulkJavaSelected ? "Clear selection" : "Select all" }}
                 </button>
               </div>
+              <div class="space-y-1">
+                <label class="block text-sm font-medium text-text-secondary">Username</label>
+                <input
+                  v-model="bulkExistingUsername"
+                  type="text"
+                  class="w-full bg-surface-0 border border-border rounded-md px-2.5 py-1.5 text-sm text-text-primary outline-none transition-colors duration-100 focus:border-border-focus focus:ring-1 focus:ring-accent/30"
+                  placeholder="admin"
+                />
+              </div>
+              <div class="space-y-1">
+                <label class="block text-sm font-medium text-text-secondary">Password</label>
+                <input
+                  v-model="bulkExistingPassword"
+                  type="password"
+                  class="w-full bg-surface-0 border border-border rounded-md px-2.5 py-1.5 text-sm text-text-primary outline-none transition-colors duration-100 focus:border-border-focus focus:ring-1 focus:ring-accent/30"
+                  placeholder="Password"
+                />
+              </div>
+              <button
+                class="w-full flex items-center justify-center gap-1.5 px-3 py-2 text-sm rounded-md border border-border bg-surface-0 text-text-secondary hover:text-text-primary hover:bg-surface-2 hover:cursor-pointer transition-colors duration-100 disabled:opacity-50 disabled:hover:cursor-default"
+                :disabled="selectedBulkJavaCount === 0"
+                @click="applyCredentialsToSelectedBulk"
+              >
+                <icon name="ph:key-bold" class="text-xs" />
+                Apply Credentials
+              </button>
               <div class="space-y-1">
                 <label class="block text-sm font-medium text-text-secondary">Java Home</label>
                 <input
@@ -1175,6 +1216,9 @@ const deselectAll = () => {
                       </span>
                     </div>
                     <p class="text-xs text-text-tertiary truncate mt-0.5">{{ draft.address }}</p>
+                    <p class="text-[11px] mt-1" :class="draft.username || draft.password ? 'text-accent' : 'text-text-disabled'">
+                      {{ draft.username || draft.password ? `Credentials ready for ${draft.username || "selected user"}` : "Credentials unchanged" }}
+                    </p>
                     <p class="text-[11px] mt-1" :class="draft.javaHome ? 'text-accent' : 'text-text-disabled'">
                       {{ draft.javaHome ? `Java Home: ${draft.javaHome}` : "Java Home: System default (auto-detected)" }}
                     </p>
