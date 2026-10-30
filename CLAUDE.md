@@ -38,5 +38,5 @@ cargo test
 
 ## Remotes
 
-- `origin` — upstream `kayyagari/ballista`
-- `mine` — fork `pacmano1/launcher`
+- `origin` — fork `ntjoumas/ballista` (master tracks this)
+- `upstream` — `kayyagari/ballista`
