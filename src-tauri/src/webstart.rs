@@ -101,7 +101,8 @@ impl WebstartFile {
             .attribute("main-class")
             .ok_or(Error::msg("missing main-class attribute"))?
             .to_string();
-        let args = get_client_args(&main_class_node);
+        let mut args = get_client_args(&main_class_node);
+        override_server_arg(&mut args, &base_url);
 
         let resources_node = get_node(&root, "resources");
 
@@ -458,6 +459,19 @@ fn get_client_args(root: &Node) -> Vec<String> {
     args
 }
 
+/// The first JNLP argument is the server URL as the server sees itself (e.g. its listening port).
+/// Replace it with the URL the user connected through so port-forwarded/proxied connections work.
+fn override_server_arg(args: &mut [String], base_url: &str) {
+    if let Some(first) = args.first_mut() {
+        let is_server_url = Url::parse(first)
+            .map(|u| matches!(u.scheme(), "http" | "https"))
+            .unwrap_or(false);
+        if is_server_url {
+            *first = base_url.to_string();
+        }
+    }
+}
+
 fn get_j2ses(resources: &Node) -> Option<Vec<J2se>> {
     let mut j2ses = Vec::new();
     for n in resources.descendants() {
@@ -567,7 +581,7 @@ pub fn clear_connection_cache(cache_dir: &Path, conn_id: &str) -> Result<usize, 
 }
 #[cfg(test)]
 mod tests {
-    use crate::webstart::normalize_url;
+    use crate::webstart::{normalize_url, override_server_arg};
     use anyhow::Error;
 
     #[test]
@@ -587,5 +601,20 @@ mod tests {
             assert_eq!(expected, &reconstructed_url);
         }
         Ok(())
+    }
+
+    #[test]
+    pub fn test_override_server_arg() {
+        let mut args = vec!["https://localhost:8443".to_string(), "4.4.1".to_string()];
+        override_server_arg(&mut args, "https://localhost:8446");
+        assert_eq!(args, vec!["https://localhost:8446", "4.4.1"]);
+
+        let mut args = vec!["4.4.1".to_string()];
+        override_server_arg(&mut args, "https://localhost:8446");
+        assert_eq!(args, vec!["4.4.1"]);
+
+        let mut args: Vec<String> = vec![];
+        override_server_arg(&mut args, "https://localhost:8446");
+        assert!(args.is_empty());
     }
 }
